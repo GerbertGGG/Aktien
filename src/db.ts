@@ -1,0 +1,253 @@
+// D1 access helpers. Keeps raw SQL in one place so the rest of the code
+// works with plain TS objects/arrays.
+
+import type {
+  BacktestParams,
+  BacktestRunOutput,
+  Env,
+  PricePoint,
+  PriceRow,
+  WatchlistEntry,
+} from "./types";
+
+export async function getWatchlist(
+  env: Env,
+  opts: { activeOnly?: boolean } = {},
+): Promise<WatchlistEntry[]> {
+  const sql = opts.activeOnly
+    ? "SELECT * FROM watchlist WHERE active = 1 ORDER BY is_benchmark ASC, ticker ASC"
+    : "SELECT * FROM watchlist ORDER BY is_benchmark ASC, ticker ASC";
+  const { results } = await env.DB.prepare(sql).all<WatchlistEntry>();
+  return results ?? [];
+}
+
+export async function getScreenerTickers(env: Env): Promise<WatchlistEntry[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM watchlist WHERE active = 1 AND is_benchmark = 0 ORDER BY ticker ASC",
+  ).all<WatchlistEntry>();
+  return results ?? [];
+}
+
+export async function getBenchmarkTicker(env: Env): Promise<string> {
+  const row = await env.DB.prepare(
+    "SELECT ticker FROM watchlist WHERE is_benchmark = 1 LIMIT 1",
+  ).first<{ ticker: string }>();
+  return row?.ticker ?? env.BENCHMARK_TICKER;
+}
+
+/** Full adjusted-close time series for a ticker, ascending by date. */
+export async function getPriceSeries(env: Env, ticker: string): Promise<PricePoint[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT date, adjusted_close FROM prices WHERE ticker = ? AND adjusted_close IS NOT NULL ORDER BY date ASC",
+  )
+    .bind(ticker)
+    .all<PricePoint>();
+  return results ?? [];
+}
+
+export async function getLatestPriceDate(env: Env, ticker: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT MAX(date) AS max_date FROM prices WHERE ticker = ?",
+  )
+    .bind(ticker)
+    .first<{ max_date: string | null }>();
+  return row?.max_date ?? null;
+}
+
+export async function getPriceRowCount(env: Env, ticker: string): Promise<number> {
+  const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM prices WHERE ticker = ?")
+    .bind(ticker)
+    .first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+/** Upsert a batch of price rows for one ticker in a single D1 batch call. */
+export async function upsertPrices(env: Env, rows: PriceRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const stmt = env.DB.prepare(
+    `INSERT INTO prices (ticker, date, open, high, low, close, adjusted_close, volume, dividend_amount, split_coefficient)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (ticker, date) DO UPDATE SET
+       open = excluded.open,
+       high = excluded.high,
+       low = excluded.low,
+       close = excluded.close,
+       adjusted_close = excluded.adjusted_close,
+       volume = excluded.volume,
+       dividend_amount = excluded.dividend_amount,
+       split_coefficient = excluded.split_coefficient`,
+  );
+  const batch = rows.map((r) =>
+    stmt.bind(
+      r.ticker,
+      r.date,
+      r.open,
+      r.high,
+      r.low,
+      r.close,
+      r.adjusted_close,
+      r.volume,
+      r.dividend_amount,
+      r.split_coefficient,
+    ),
+  );
+  // D1 batches are capped well above our per-ticker row counts (~5-6k for
+  // 'full' history), but chunk defensively to stay safe.
+  const CHUNK = 500;
+  let total = 0;
+  for (let i = 0; i < batch.length; i += CHUNK) {
+    const chunk = batch.slice(i, i + CHUNK);
+    await env.DB.batch(chunk);
+    total += chunk.length;
+  }
+  return total;
+}
+
+export async function logFetch(
+  env: Env,
+  entry: {
+    ticker: string;
+    output_size: "full" | "compact";
+    status: "ok" | "error" | "rate_limited" | "skipped_budget";
+    message?: string;
+    rows_upserted?: number;
+  },
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO fetch_log (ticker, output_size, status, message, rows_upserted)
+     VALUES (?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      entry.ticker,
+      entry.output_size,
+      entry.status,
+      entry.message ?? null,
+      entry.rows_upserted ?? 0,
+    )
+    .run();
+}
+
+/** Count of successful Alpha Vantage requests already made today (UTC), used for the 25/day budget. */
+export async function countRequestsToday(env: Env): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM fetch_log
+     WHERE status IN ('ok', 'error')
+       AND date(fetched_at) = date('now')`,
+  ).first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+export async function hasFetchedOkToday(env: Env, ticker: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS present FROM fetch_log
+     WHERE ticker = ? AND status = 'ok' AND date(fetched_at) = date('now')
+     LIMIT 1`,
+  )
+    .bind(ticker)
+    .first<{ present: number }>();
+  return !!row;
+}
+
+export async function getRecentFetchLog(env: Env, limit = 30) {
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM fetch_log ORDER BY fetched_at DESC LIMIT ?",
+  )
+    .bind(limit)
+    .all();
+  return results ?? [];
+}
+
+/** Persists one backtest segment (full | in_sample | out_of_sample) and its equity curve / holdings. Returns the new run id. */
+export async function saveBacktestRun(
+  env: Env,
+  params: BacktestParams,
+  output: BacktestRunOutput,
+): Promise<number> {
+  const runRow = await env.DB.prepare(
+    `INSERT INTO backtest_runs
+       (strategy, params, split, start_date, end_date, cagr, sharpe, max_drawdown, volatility,
+        benchmark_cagr, benchmark_sharpe, benchmark_max_drawdown, benchmark_volatility, n_rebalances)
+     VALUES ('momentum_12_1', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     RETURNING id`,
+  )
+    .bind(
+      JSON.stringify(params),
+      output.split,
+      output.start_date,
+      output.end_date,
+      output.strategy.cagr,
+      output.strategy.sharpe,
+      output.strategy.max_drawdown,
+      output.strategy.volatility,
+      output.benchmark.cagr,
+      output.benchmark.sharpe,
+      output.benchmark.max_drawdown,
+      output.benchmark.volatility,
+      output.n_rebalances,
+    )
+    .first<{ id: number }>();
+
+  const runId = runRow!.id;
+
+  if (output.equity_curve.length > 0) {
+    const stmt = env.DB.prepare(
+      `INSERT INTO backtest_equity_curve (run_id, date, strategy_equity, benchmark_equity)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (run_id, date) DO UPDATE SET
+         strategy_equity = excluded.strategy_equity,
+         benchmark_equity = excluded.benchmark_equity`,
+    );
+    const batch = output.equity_curve.map((p) => stmt.bind(runId, p.date, p.strategy_equity, p.benchmark_equity));
+    const CHUNK = 500;
+    for (let i = 0; i < batch.length; i += CHUNK) {
+      await env.DB.batch(batch.slice(i, i + CHUNK));
+    }
+  }
+
+  if (output.holdings.length > 0) {
+    const stmt = env.DB.prepare(
+      `INSERT INTO backtest_holdings (run_id, rebalance_date, ticker, momentum_score, weight)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (run_id, rebalance_date, ticker) DO UPDATE SET
+         momentum_score = excluded.momentum_score,
+         weight = excluded.weight`,
+    );
+    const batch = output.holdings.map((h) => stmt.bind(runId, h.rebalance_date, h.ticker, h.momentum_score, h.weight));
+    const CHUNK = 500;
+    for (let i = 0; i < batch.length; i += CHUNK) {
+      await env.DB.batch(batch.slice(i, i + CHUNK));
+    }
+  }
+
+  return runId;
+}
+
+/** Most recent run per split ('full' | 'in_sample' | 'out_of_sample'), based on created_at. */
+export async function getLatestBacktestRuns(env: Env) {
+  const { results } = await env.DB.prepare(
+    `SELECT br.* FROM backtest_runs br
+     INNER JOIN (
+       SELECT split, MAX(created_at) AS max_created_at FROM backtest_runs GROUP BY split
+     ) latest ON br.split = latest.split AND br.created_at = latest.max_created_at
+     ORDER BY br.split ASC`,
+  ).all();
+  return results ?? [];
+}
+
+export async function getEquityCurve(env: Env, runId: number) {
+  const { results } = await env.DB.prepare(
+    "SELECT date, strategy_equity, benchmark_equity FROM backtest_equity_curve WHERE run_id = ? ORDER BY date ASC",
+  )
+    .bind(runId)
+    .all();
+  return results ?? [];
+}
+
+export async function getHoldings(env: Env, runId: number) {
+  const { results } = await env.DB.prepare(
+    "SELECT rebalance_date, ticker, momentum_score, weight FROM backtest_holdings WHERE run_id = ? ORDER BY rebalance_date ASC, weight DESC",
+  )
+    .bind(runId)
+    .all();
+  return results ?? [];
+}

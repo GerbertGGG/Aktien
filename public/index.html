@@ -1,0 +1,101 @@
+<title>Momentum-Screener</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/style.css" />
+
+<div class="wrap">
+  <header>
+    <h1>Momentum-Screener &amp; Backtest</h1>
+    <p class="subtitle">12-1-Momentum-Ranking der Watchlist mit historischem Backtest gegen SPY.</p>
+  </header>
+
+  <div class="banner alert">
+    <strong>Kein Anlageberatung.</strong>
+    Dieses Tool gibt keine Kauf-/Verkaufsempfehlungen aus und fuehrt keine Orders aus. Es zeigt
+    ausschliesslich ein regelbasiertes Ranking und dessen historische Simulation. Historische
+    Ergebnisse sind keine Garantie fuer zukuenftige Wertentwicklung.
+  </div>
+
+  <div class="banner" id="survivorship-banner">
+    <strong>Survivorship-Bias-Hinweis</strong>
+    <span id="survivorship-text">Die Watchlist enthaelt nur heute existierende Aktien. Historische Backtest-Ergebnisse koennen dadurch optimistisch verzerrt sein.</span>
+  </div>
+
+  <div class="banner" id="premium-warning" style="display:none"></div>
+
+  <section id="screener-section">
+    <h2>Screener: 12-1-Momentum-Ranking</h2>
+    <p class="hint" id="screener-hint">Rang nach historischem 12-1-Momentum (12-Monats-Return, letzter Monat ausgeschlossen) &mdash; kein Kaufsignal.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Rang</th>
+          <th>Ticker</th>
+          <th>Momentum (12-1)</th>
+          <th>Preis t-1M</th>
+          <th>Preis t-12M</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="screener-body">
+        <tr><td colspan="6" class="muted">Lade...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="backtest-section">
+    <h2>Backtest: Strategie vs. Benchmark (SPY)</h2>
+    <p class="hint">Monatliches Rebalancing, Transaktionskosten und Out-of-Sample-Split sind fest in der Engine hinterlegt (siehe README) &mdash; keine nachtraegliche Parameteroptimierung.</p>
+
+    <div class="tabs" id="split-tabs">
+      <button class="tab-btn active" data-split="full">Gesamter Zeitraum</button>
+      <button class="tab-btn" data-split="in_sample">In-Sample (erste 70%)</button>
+      <button class="tab-btn" data-split="out_of_sample">Out-of-Sample (letzte 30%)</button>
+    </div>
+
+    <div class="kpi-grid" id="kpi-grid">
+      <div class="kpi"><div class="label">CAGR Strategie</div><div class="value" id="kpi-cagr-strategy">&ndash;</div></div>
+      <div class="kpi"><div class="label">CAGR Benchmark</div><div class="value" id="kpi-cagr-benchmark">&ndash;</div></div>
+      <div class="kpi"><div class="label">Sharpe Strategie</div><div class="value" id="kpi-sharpe-strategy">&ndash;</div></div>
+      <div class="kpi"><div class="label">Sharpe Benchmark</div><div class="value" id="kpi-sharpe-benchmark">&ndash;</div></div>
+      <div class="kpi"><div class="label">Max Drawdown Strategie</div><div class="value" id="kpi-mdd-strategy">&ndash;</div></div>
+      <div class="kpi"><div class="label">Max Drawdown Benchmark</div><div class="value" id="kpi-mdd-benchmark">&ndash;</div></div>
+      <div class="kpi"><div class="label">Volatilitaet Strategie</div><div class="value" id="kpi-vol-strategy">&ndash;</div></div>
+      <div class="kpi"><div class="label">Volatilitaet Benchmark</div><div class="value" id="kpi-vol-benchmark">&ndash;</div></div>
+    </div>
+
+    <div class="legend">
+      <span class="strategy">Strategie (Top-N Momentum)</span>
+      <span class="benchmark">Benchmark (SPY, Buy&amp;Hold)</span>
+    </div>
+    <div class="chart-wrap">
+      <svg class="equity-chart" id="equity-chart" viewBox="0 0 900 320" preserveAspectRatio="none"></svg>
+    </div>
+    <p class="hint" id="backtest-meta">&nbsp;</p>
+
+    <div class="actions">
+      <button class="primary" id="run-backtest-btn">Backtest neu berechnen</button>
+      <input class="admin-token" id="admin-token" type="password" placeholder="Admin-Token (falls konfiguriert)" />
+      <span class="status-line" id="backtest-status"></span>
+    </div>
+  </section>
+
+  <section id="status-section">
+    <h2>Datenstand &amp; Alpha-Vantage-Budget</h2>
+    <p class="status-line" id="status-summary">Lade...</p>
+    <div class="actions">
+      <button class="primary" id="run-update-btn">Preis-Update jetzt ausloesen</button>
+      <span class="status-line" id="update-status"></span>
+    </div>
+    <details>
+      <summary>Letzte Fetch-Log-Eintraege</summary>
+      <pre class="log" id="fetch-log">&nbsp;</pre>
+    </details>
+  </section>
+
+  <footer>
+    Datenquelle: Alpha Vantage (TIME_SERIES_DAILY_ADJUSTED, Free Tier). Kein automatisierter Handel, keine Order-Ausfuehrung.
+  </footer>
+</div>
+
+<script src="/app.js"></script>

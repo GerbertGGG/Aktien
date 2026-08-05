@@ -1,0 +1,49 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "momentum-screener"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---------------------------------------------------------------------------
+# D1 database binding.
+# Create the DB first with `npm run db:create`, then paste the returned
+# database_id below (see README.md, section "Setup").
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "momentum-screener-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# ---------------------------------------------------------------------------
+# Cron Trigger: daily price update, 22:00 UTC (nach US-Marktschluss, 16:00 ET
+# im Sommer / 17:00 ET im Winter liegen beide vor 22:00 UTC).
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["0 22 * * *"]
+
+# ---------------------------------------------------------------------------
+# Static dashboard assets. Cloudflare serves matching files directly; only
+# requests that don't match a static file (e.g. /api/*) reach the Worker.
+# ---------------------------------------------------------------------------
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# ---------------------------------------------------------------------------
+# Defaults for screener/backtest parameters. All are overridable per
+# backtest run via the POST /api/backtest/run request body.
+# ---------------------------------------------------------------------------
+[vars]
+BENCHMARK_TICKER = "SPY"
+DEFAULT_TOP_N = "5"
+DEFAULT_LOOKBACK_MONTHS = "12"
+DEFAULT_SKIP_MONTHS = "1"
+DEFAULT_TX_COST_BPS = "10"
+DEFAULT_RISK_FREE_RATE = "0.04"
+DEFAULT_OOS_SPLIT = "0.7"
+MAX_REQUESTS_PER_DAY = "25"
+MAX_REQUESTS_PER_MINUTE = "5"
+
+# Secret (do NOT put here): set via `wrangler secret put ALPHA_VANTAGE_KEY`
