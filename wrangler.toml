@@ -12,7 +12,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "momentum-screener-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "c0231ab4-5e66-4550-93e6-4828c9e05395"
 migrations_dir = "migrations"
 
 # ---------------------------------------------------------------------------
