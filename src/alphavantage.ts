@@ -61,6 +61,14 @@ interface RawTimeSeriesResponse<T> {
   Information?: string;
 }
 
+interface RawMonthlyResponse {
+  "Meta Data"?: Record<string, string>;
+  "Monthly Time Series"?: Record<string, RawDailyPointUnadjusted>;
+  "Error Message"?: string;
+  Note?: string;
+  Information?: string;
+}
+
 interface RawSplitsResponse {
   symbol?: string;
   data?: Array<{ effective_date: string; split_factor: string }>;
@@ -175,6 +183,51 @@ export async function fetchDaily(apiKey: string, ticker: string, outputSize: Out
   const series = result.data["Time Series (Daily)"];
   if (!series) {
     return { kind: "error", message: "Unerwartete Antwortstruktur: kein 'Time Series (Daily)'-Feld vorhanden." };
+  }
+
+  const rows: PriceRow[] = Object.entries(series).map(([date, p]) => {
+    const close = num(p["4. close"]) ?? 0;
+    return {
+      ticker,
+      date,
+      open: num(p["1. open"]),
+      high: num(p["2. high"]),
+      low: num(p["3. low"]),
+      close,
+      adjusted_close: close, // placeholder; overwritten by applySplitAdjustment
+      volume: p["5. volume"] ? Math.trunc(Number(p["5. volume"])) : null,
+      dividend_amount: null,
+      split_coefficient: null,
+    };
+  });
+
+  return { kind: "ok", rows };
+}
+
+/**
+ * TIME_SERIES_MONTHLY — unadjusted monthly close, ALWAYS full history, and
+ * confirmed free-tier accessible (unlike DAILY's outputsize=full, which is
+ * premium-gated). Used once per ticker to backfill years of history in a
+ * single request; `src/cron.ts` layers daily-compact data on top for the
+ * most recent ~100 days. One monthly close per calendar month is exactly
+ * what the monthly-rebalancing backtest needs, so no daily granularity is
+ * lost where it matters.
+ */
+export async function fetchMonthly(apiKey: string, ticker: string): Promise<FetchOutcome> {
+  const result = await fetchJson<RawMonthlyResponse>({
+    function: "TIME_SERIES_MONTHLY",
+    symbol: ticker,
+    datatype: "json",
+    apikey: apiKey,
+  });
+  if (!result.ok) return { kind: "error", message: result.message };
+
+  const err = classifyError(result.data);
+  if (err) return err;
+
+  const series = result.data["Monthly Time Series"];
+  if (!series) {
+    return { kind: "error", message: "Unerwartete Antwortstruktur: kein 'Monthly Time Series'-Feld vorhanden." };
   }
 
   const rows: PriceRow[] = Object.entries(series).map(([date, p]) => {

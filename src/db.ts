@@ -165,7 +165,7 @@ export async function logFetch(
   env: Env,
   entry: {
     ticker: string;
-    output_size: "full" | "compact" | "splits";
+    output_size: "full" | "compact" | "monthly" | "splits";
     status: "ok" | "error" | "rate_limited" | "skipped_budget";
     message?: string;
     rows_upserted?: number;
@@ -205,6 +205,18 @@ export async function getLastSplitsFetchAt(env: Env, ticker: string): Promise<st
     .bind(ticker)
     .first<{ fetched_at: string }>();
   return row?.fetched_at ?? null;
+}
+
+/** Whether a given output_size (e.g. 'monthly') has ever succeeded for a ticker — used to gate one-time backfills. */
+export async function hasEverFetchedOk(env: Env, ticker: string, outputSize: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT 1 AS present FROM fetch_log
+     WHERE ticker = ? AND output_size = ? AND status = 'ok'
+     LIMIT 1`,
+  )
+    .bind(ticker, outputSize)
+    .first<{ present: number }>();
+  return !!row;
 }
 
 export async function hasFetchedOkToday(env: Env, ticker: string): Promise<boolean> {

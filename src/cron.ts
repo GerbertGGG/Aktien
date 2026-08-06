@@ -2,34 +2,44 @@
 // 22:00 UTC) via the `scheduled` handler in index.ts, and callable manually
 // via POST /api/admin/run-update for local testing.
 //
-// Data source (verified 2026-08-05 against a real free-tier key):
-// TIME_SERIES_DAILY_ADJUSTED is premium-gated for this key, so the default
-// path combines two endpoints that DO work on the free tier:
-//   - TIME_SERIES_DAILY (unadjusted daily close)
-//   - SPLITS             (official split history)
-// and computes `adjusted_close` locally (db.applySplitAdjustment). This is
-// split-adjustment only, not dividend-adjustment — see README.
+// Data source (verified 2026-08-05/06 against a real free-tier key):
+//   - TIME_SERIES_DAILY_ADJUSTED           -> premium-gated
+//   - TIME_SERIES_DAILY, outputsize=full   -> ALSO premium-gated
+//     ("The outputsize=full parameter value is a premium feature")
+//   - TIME_SERIES_DAILY, outputsize=compact -> free (last ~100 trading days)
+//   - TIME_SERIES_MONTHLY                   -> free, and always returns the
+//     FULL available history (no outputsize param) — confirmed going back
+//     years for AAPL.
+//   - SPLITS                                -> free
+//
+// So a one-shot "give me 20 years of daily data" backfill isn't available
+// on this tier at all. Instead:
+//   - Once per ticker: TIME_SERIES_MONTHLY (years of history, 1 request)
+//     + SPLITS (1 request) = 2 requests, never repeated.
+//   - Every day after that: TIME_SERIES_DAILY compact (1 request) layers
+//     precise recent data on top of the monthly backbone; SPLITS is
+//     re-checked only every ~30 days (splits are rare).
+// One monthly close per calendar month is exactly what the momentum signal
+// (12-1, monthly-sampled) and the monthly-rebalancing backtest need, so
+// PriceIndex/momentum/backtest required NO changes for this — they already
+// do point-in-time "closest date on-or-before" lookups over whatever mix of
+// monthly/daily rows happens to be stored.
 //
 // Rate-limit strategy (Alpha Vantage free tier: 5 req/min, 25 req/day):
-//  - A ticker with < ~1 trading year of stored history gets a 'full' daily
-//    fetch (entire available history in one request) plus its full split
-//    history (2 requests total for a brand-new ticker).
-//  - A ticker with enough history only needs a 'compact' daily fetch (last
-//    ~100 days, 1 request) most days; its split history is only re-checked
-//    every ~30 days (splits are rare), adding a 2nd request on those days.
-//  - Every individual HTTP request (daily OR splits) is spaced >12s apart
-//    (stays under 5/min) and counted against the daily budget — items that
-//    don't fit the remaining budget this run are skipped and retried on a
-//    later run/day, prioritizing backfills and then the most stale tickers.
+// every individual HTTP request is spaced >12s apart and counted against
+// the daily budget; items that don't fit the remaining budget this run are
+// skipped (not aborted) so a cheaper item further down the list still gets
+// a chance, and are retried on a later run/day, prioritizing backfills and
+// then the most stale tickers.
 
-import { fetchDaily, fetchSplits, sleep } from "./alphavantage";
+import { fetchDaily, fetchMonthly, fetchSplits, sleep } from "./alphavantage";
 import {
   applySplitAdjustment,
   countRequestsToday,
   getLastSplitsFetchAt,
   getLatestPriceDate,
-  getPriceRowCount,
   getWatchlist,
+  hasEverFetchedOk,
   hasFetchedOkToday,
   logFetch,
   replaceSplits,
@@ -38,7 +48,6 @@ import {
 import type { Env } from "./types";
 
 const MIN_INTERVAL_MS = 13_000; // > 60s/5 = 12s, small safety margin
-const FULL_BACKFILL_ROW_THRESHOLD = 260; // ~1 trading year
 const SPLITS_REFRESH_DAYS = 30; // splits are rare; no need to re-check daily
 
 export interface UpdateRunSummary {
@@ -48,12 +57,12 @@ export interface UpdateRunSummary {
   errors: number;
   rateLimited: boolean;
   premiumGated: boolean;
-  details: Array<{ ticker: string; requestKind: "full" | "compact" | "splits"; status: string; message?: string; rows?: number }>;
+  details: Array<{ ticker: string; requestKind: "monthly" | "compact" | "splits"; status: string; message?: string; rows?: number }>;
 }
 
-interface WorkItem {
+export interface WorkItem {
   ticker: string;
-  needsBackfill: boolean;
+  needsMonthlyBackfill: boolean;
   needsSplitsRefresh: boolean;
   cost: number; // number of HTTP requests this item will use
   latestDate: string | null;
@@ -64,6 +73,45 @@ function isOlderThanDays(sqliteTimestamp: string, days: number): boolean {
   const then = new Date(sqliteTimestamp.replace(" ", "T") + "Z").getTime();
   if (Number.isNaN(then)) return true;
   return Date.now() - then > days * 24 * 3600 * 1000;
+}
+
+/**
+ * Decides what each active, not-yet-updated-today ticker needs this run
+ * (monthly backfill? splits refresh?) and its request cost, sorted with
+ * backfills first, then most-stale-first. Pure D1 reads, no network calls —
+ * kept separate from the fetch/write loop below so it can be exercised
+ * directly against a real local D1 instance without needing to mock fetch().
+ */
+export async function buildWorkItems(env: Env): Promise<WorkItem[]> {
+  const watchlist = await getWatchlist(env, { activeOnly: true });
+
+  const items: WorkItem[] = [];
+  for (const entry of watchlist) {
+    if (await hasFetchedOkToday(env, entry.ticker)) continue;
+    const needsMonthlyBackfill = !(await hasEverFetchedOk(env, entry.ticker, "monthly"));
+    const lastSplitsFetch = await getLastSplitsFetchAt(env, entry.ticker);
+    const needsSplitsRefresh = needsMonthlyBackfill || lastSplitsFetch === null || isOlderThanDays(lastSplitsFetch, SPLITS_REFRESH_DAYS);
+    const latestDate = await getLatestPriceDate(env, entry.ticker);
+    items.push({
+      ticker: entry.ticker,
+      needsMonthlyBackfill,
+      needsSplitsRefresh,
+      cost: 1 + (needsSplitsRefresh ? 1 : 0),
+      latestDate,
+    });
+  }
+
+  // Backfills first (highest value per request), then most-stale incremental
+  // updates first.
+  items.sort((a, b) => {
+    if (a.needsMonthlyBackfill !== b.needsMonthlyBackfill) return a.needsMonthlyBackfill ? -1 : 1;
+    const ad = a.latestDate ?? "";
+    const bd = b.latestDate ?? "";
+    if (ad !== bd) return ad < bd ? -1 : 1;
+    return a.ticker.localeCompare(b.ticker);
+  });
+
+  return items;
 }
 
 export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
@@ -83,34 +131,7 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
 
   if (budgetRemaining <= 0) return summary;
 
-  const watchlist = await getWatchlist(env, { activeOnly: true });
-
-  const items: WorkItem[] = [];
-  for (const entry of watchlist) {
-    if (await hasFetchedOkToday(env, entry.ticker)) continue;
-    const rowCount = await getPriceRowCount(env, entry.ticker);
-    const needsBackfill = rowCount < FULL_BACKFILL_ROW_THRESHOLD;
-    const lastSplitsFetch = await getLastSplitsFetchAt(env, entry.ticker);
-    const needsSplitsRefresh = needsBackfill || lastSplitsFetch === null || isOlderThanDays(lastSplitsFetch, SPLITS_REFRESH_DAYS);
-    const latestDate = await getLatestPriceDate(env, entry.ticker);
-    items.push({
-      ticker: entry.ticker,
-      needsBackfill,
-      needsSplitsRefresh,
-      cost: 1 + (needsSplitsRefresh ? 1 : 0),
-      latestDate,
-    });
-  }
-
-  // Backfills first (highest value per request), then most-stale incremental
-  // updates first.
-  items.sort((a, b) => {
-    if (a.needsBackfill !== b.needsBackfill) return a.needsBackfill ? -1 : 1;
-    const ad = a.latestDate ?? "";
-    const bd = b.latestDate ?? "";
-    if (ad !== bd) return ad < bd ? -1 : 1;
-    return a.ticker.localeCompare(b.ticker);
-  });
+  const items = await buildWorkItems(env);
 
   let firstRequest = true;
   const spaceOut = async () => {
@@ -123,38 +144,40 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
     // a cheaper item further down the list might still fit.
     if (budgetRemaining < item.cost) continue;
 
-    const dailyOutputSize = item.needsBackfill ? "full" : "compact";
+    const priceRequestKind: "monthly" | "compact" = item.needsMonthlyBackfill ? "monthly" : "compact";
 
     await spaceOut();
     summary.attempted++;
-    const dailyOutcome = await fetchDaily(env.ALPHA_VANTAGE_KEY, item.ticker, dailyOutputSize);
+    const priceOutcome = item.needsMonthlyBackfill
+      ? await fetchMonthly(env.ALPHA_VANTAGE_KEY, item.ticker)
+      : await fetchDaily(env.ALPHA_VANTAGE_KEY, item.ticker, "compact");
     budgetRemaining--;
 
-    if (dailyOutcome.kind === "rate_limited") {
-      await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "rate_limited", message: dailyOutcome.message });
+    if (priceOutcome.kind === "rate_limited") {
+      await logFetch(env, { ticker: item.ticker, output_size: priceRequestKind, status: "rate_limited", message: priceOutcome.message });
       summary.rateLimited = true;
-      summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: "rate_limited", message: dailyOutcome.message });
+      summary.details.push({ ticker: item.ticker, requestKind: priceRequestKind, status: "rate_limited", message: priceOutcome.message });
       break;
     }
-    if (dailyOutcome.kind === "premium_gated") {
-      await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "error", message: `PREMIUM_GATED: ${dailyOutcome.message}` });
+    if (priceOutcome.kind === "premium_gated") {
+      await logFetch(env, { ticker: item.ticker, output_size: priceRequestKind, status: "error", message: `PREMIUM_GATED: ${priceOutcome.message}` });
       summary.errors++;
       summary.premiumGated = true;
-      summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: "premium_gated", message: dailyOutcome.message });
+      summary.details.push({ ticker: item.ticker, requestKind: priceRequestKind, status: "premium_gated", message: priceOutcome.message });
       break;
     }
-    if (dailyOutcome.kind !== "ok") {
-      await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "error", message: dailyOutcome.message });
+    if (priceOutcome.kind !== "ok") {
+      await logFetch(env, { ticker: item.ticker, output_size: priceRequestKind, status: "error", message: priceOutcome.message });
       summary.errors++;
-      summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: dailyOutcome.kind, message: dailyOutcome.message });
+      summary.details.push({ ticker: item.ticker, requestKind: priceRequestKind, status: priceOutcome.kind, message: priceOutcome.message });
       continue; // no price data to adjust; move on to the next ticker
     }
 
-    const rows = dailyOutcome.rows.map((r) => ({ ...r, ticker: item.ticker }));
+    const rows = priceOutcome.rows.map((r) => ({ ...r, ticker: item.ticker }));
     const upserted = await upsertPrices(env, rows);
-    await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "ok", rows_upserted: upserted });
+    await logFetch(env, { ticker: item.ticker, output_size: priceRequestKind, status: "ok", rows_upserted: upserted });
     summary.ok++;
-    summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: "ok", rows: upserted });
+    summary.details.push({ ticker: item.ticker, requestKind: priceRequestKind, status: "ok", rows: upserted });
 
     let stopAfterThisItem = false;
     if (item.needsSplitsRefresh) {

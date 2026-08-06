@@ -2,13 +2,16 @@
 //  - GET  /api/admin/test-fetch : one-off raw Alpha Vantage call, used to
 //    verify the API key + response structure after `wrangler secret put`
 //    (see README "Setup Schritt 2"). Does NOT write to D1. Supports
-//    ?function=adjusted|daily|splits to probe each endpoint independently.
+//    ?function=monthly|daily|splits|adjusted to probe each endpoint
+//    independently ("monthly" + "daily" [compact] is what the cron job
+//    actually uses by default; "adjusted" and daily's outputsize=full are
+//    premium-gated on this project's test key, kept for reference/debugging).
 //  - POST /api/admin/run-update : manually trigger the same logic the daily
 //    Cron Trigger runs, useful for local testing without waiting for 22:00 UTC.
 //
 // Both are gated behind ADMIN_TOKEN if that secret is set (see types.ts).
 
-import { fetchDaily, fetchDailyAdjusted, fetchSplits } from "../alphavantage";
+import { fetchDaily, fetchDailyAdjusted, fetchMonthly, fetchSplits } from "../alphavantage";
 import { runDailyUpdate } from "../cron";
 import { json, jsonError } from "../http";
 import type { Env } from "../types";
@@ -21,7 +24,7 @@ export function isAuthorized(env: Env, request: Request): boolean {
 export async function handleTestFetch(env: Env, url: URL): Promise<Response> {
   const ticker = url.searchParams.get("ticker") ?? "AAPL";
   const outputsize = (url.searchParams.get("outputsize") === "full" ? "full" : "compact") as "full" | "compact";
-  const fn = url.searchParams.get("function") ?? "daily"; // "adjusted" | "daily" | "splits" — "daily" is what the cron job actually uses by default
+  const fn = url.searchParams.get("function") ?? "daily"; // "monthly" | "daily" | "splits" | "adjusted"
 
   if (!env.ALPHA_VANTAGE_KEY) {
     return jsonError(
@@ -36,6 +39,14 @@ export async function handleTestFetch(env: Env, url: URL): Promise<Response> {
       return json({ kind: outcome.kind, ticker, function: "splits", split_count: outcome.splits.length, splits: outcome.splits });
     }
     return json({ kind: outcome.kind, ticker, function: "splits", message: outcome.message }, { status: 502 });
+  }
+
+  if (fn === "monthly") {
+    const outcome = await fetchMonthly(env.ALPHA_VANTAGE_KEY, ticker);
+    if (outcome.kind === "ok") {
+      return json({ kind: outcome.kind, ticker, function: "monthly", row_count: outcome.rows.length, sample_rows: outcome.rows.slice(0, 3) });
+    }
+    return json({ kind: outcome.kind, ticker, function: "monthly", message: outcome.message }, { status: 502 });
   }
 
   const outcome =
