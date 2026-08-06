@@ -20,8 +20,10 @@ export async function handleStatus(env: Env): Promise<Response> {
     requests_used_today: usedToday,
     requests_budget_per_day: maxPerDay,
     requests_remaining_today: Math.max(0, maxPerDay - usedToday),
+    data_mode:
+      "split_adjusted_only: Kurse via TIME_SERIES_DAILY (unadjusted) + SPLITS, adjusted_close selbst rueckwirkend berechnet. NICHT dividenden-bereinigt (TIME_SERIES_DAILY_ADJUSTED ist fuer diesen Key premium-gated, siehe README).",
     premium_gated_warning: premiumGatedRecently
-      ? "Alpha Vantage hat kuerzlich einen 'premium endpoint'-Hinweis fuer TIME_SERIES_DAILY_ADJUSTED zurueckgegeben. Bitte pruefen, ob euer Free-Tier-Key adjusted-Daten liefert (siehe README)."
+      ? "Alpha Vantage hat kuerzlich einen 'premium endpoint'-Hinweis zurueckgegeben (siehe recent_fetch_log). Betroffenen Request pruefen."
       : null,
     recent_fetch_log: recentLog,
   });

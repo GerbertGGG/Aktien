@@ -2,32 +2,44 @@
 // 22:00 UTC) via the `scheduled` handler in index.ts, and callable manually
 // via POST /api/admin/run-update for local testing.
 //
+// Data source (verified 2026-08-05 against a real free-tier key):
+// TIME_SERIES_DAILY_ADJUSTED is premium-gated for this key, so the default
+// path combines two endpoints that DO work on the free tier:
+//   - TIME_SERIES_DAILY (unadjusted daily close)
+//   - SPLITS             (official split history)
+// and computes `adjusted_close` locally (db.applySplitAdjustment). This is
+// split-adjustment only, not dividend-adjustment — see README.
+//
 // Rate-limit strategy (Alpha Vantage free tier: 5 req/min, 25 req/day):
-//  - A ticker with < ~1 trading year of stored history gets 'full'
-//    outputsize (fetches the entire available history in ONE request).
-//  - A ticker that already has enough history only needs 'compact'
-//    (last ~100 days) to catch up — cheap, and self-corrects the last
-//    few days in case Alpha Vantage restates adjusted values.
-//  - Requests are spaced >12s apart (stays under 5/min) and capped at the
-//    remaining daily budget (tracked via fetch_log, see db.ts).
-//  - If the watchlist doesn't fully fit into a day's budget, the least
-//    recently updated tickers go first, so the fetch cursor naturally
-//    "walks" the list across multiple days.
+//  - A ticker with < ~1 trading year of stored history gets a 'full' daily
+//    fetch (entire available history in one request) plus its full split
+//    history (2 requests total for a brand-new ticker).
+//  - A ticker with enough history only needs a 'compact' daily fetch (last
+//    ~100 days, 1 request) most days; its split history is only re-checked
+//    every ~30 days (splits are rare), adding a 2nd request on those days.
+//  - Every individual HTTP request (daily OR splits) is spaced >12s apart
+//    (stays under 5/min) and counted against the daily budget — items that
+//    don't fit the remaining budget this run are skipped and retried on a
+//    later run/day, prioritizing backfills and then the most stale tickers.
 
-import { fetchDailyAdjusted, sleep, type OutputSize } from "./alphavantage";
+import { fetchDaily, fetchSplits, sleep } from "./alphavantage";
 import {
+  applySplitAdjustment,
   countRequestsToday,
+  getLastSplitsFetchAt,
+  getLatestPriceDate,
   getPriceRowCount,
   getWatchlist,
   hasFetchedOkToday,
-  getLatestPriceDate,
   logFetch,
+  replaceSplits,
   upsertPrices,
 } from "./db";
 import type { Env } from "./types";
 
 const MIN_INTERVAL_MS = 13_000; // > 60s/5 = 12s, small safety margin
 const FULL_BACKFILL_ROW_THRESHOLD = 260; // ~1 trading year
+const SPLITS_REFRESH_DAYS = 30; // splits are rare; no need to re-check daily
 
 export interface UpdateRunSummary {
   budgetAtStart: number;
@@ -36,22 +48,31 @@ export interface UpdateRunSummary {
   errors: number;
   rateLimited: boolean;
   premiumGated: boolean;
-  details: Array<{ ticker: string; outputSize: OutputSize; status: string; message?: string; rows?: number }>;
+  details: Array<{ ticker: string; requestKind: "full" | "compact" | "splits"; status: string; message?: string; rows?: number }>;
 }
 
-interface Candidate {
+interface WorkItem {
   ticker: string;
-  outputSize: OutputSize;
+  needsBackfill: boolean;
+  needsSplitsRefresh: boolean;
+  cost: number; // number of HTTP requests this item will use
   latestDate: string | null;
+}
+
+function isOlderThanDays(sqliteTimestamp: string, days: number): boolean {
+  // fetch_log.fetched_at is SQLite CURRENT_TIMESTAMP: "YYYY-MM-DD HH:MM:SS" (UTC, no 'Z').
+  const then = new Date(sqliteTimestamp.replace(" ", "T") + "Z").getTime();
+  if (Number.isNaN(then)) return true;
+  return Date.now() - then > days * 24 * 3600 * 1000;
 }
 
 export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
   const maxPerDay = Number(env.MAX_REQUESTS_PER_DAY) || 25;
   const alreadyUsed = await countRequestsToday(env);
-  const budgetAtStart = Math.max(0, maxPerDay - alreadyUsed);
+  let budgetRemaining = Math.max(0, maxPerDay - alreadyUsed);
 
   const summary: UpdateRunSummary = {
-    budgetAtStart,
+    budgetAtStart: budgetRemaining,
     attempted: 0,
     ok: 0,
     errors: 0,
@@ -60,91 +81,116 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
     details: [],
   };
 
-  if (budgetAtStart <= 0) {
-    return summary;
-  }
+  if (budgetRemaining <= 0) return summary;
 
   const watchlist = await getWatchlist(env, { activeOnly: true });
 
-  const candidates: Candidate[] = [];
+  const items: WorkItem[] = [];
   for (const entry of watchlist) {
     if (await hasFetchedOkToday(env, entry.ticker)) continue;
     const rowCount = await getPriceRowCount(env, entry.ticker);
-    const outputSize: OutputSize = rowCount < FULL_BACKFILL_ROW_THRESHOLD ? "full" : "compact";
+    const needsBackfill = rowCount < FULL_BACKFILL_ROW_THRESHOLD;
+    const lastSplitsFetch = await getLastSplitsFetchAt(env, entry.ticker);
+    const needsSplitsRefresh = needsBackfill || lastSplitsFetch === null || isOlderThanDays(lastSplitsFetch, SPLITS_REFRESH_DAYS);
     const latestDate = await getLatestPriceDate(env, entry.ticker);
-    candidates.push({ ticker: entry.ticker, outputSize, latestDate });
+    items.push({
+      ticker: entry.ticker,
+      needsBackfill,
+      needsSplitsRefresh,
+      cost: 1 + (needsSplitsRefresh ? 1 : 0),
+      latestDate,
+    });
   }
 
-  // Full backfills first (highest value per request), then most-stale
-  // incremental updates first.
-  candidates.sort((a, b) => {
-    if (a.outputSize !== b.outputSize) return a.outputSize === "full" ? -1 : 1;
+  // Backfills first (highest value per request), then most-stale incremental
+  // updates first.
+  items.sort((a, b) => {
+    if (a.needsBackfill !== b.needsBackfill) return a.needsBackfill ? -1 : 1;
     const ad = a.latestDate ?? "";
     const bd = b.latestDate ?? "";
     if (ad !== bd) return ad < bd ? -1 : 1;
     return a.ticker.localeCompare(b.ticker);
   });
 
-  const selected = candidates.slice(0, budgetAtStart);
+  let firstRequest = true;
+  const spaceOut = async () => {
+    if (!firstRequest) await sleep(MIN_INTERVAL_MS);
+    firstRequest = false;
+  };
 
-  for (let i = 0; i < selected.length; i++) {
-    const item = selected[i];
-    if (!item) continue;
-    if (i > 0) await sleep(MIN_INTERVAL_MS);
+  for (const item of items) {
+    // Skip (not "stop") items that don't fit the remaining budget this run —
+    // a cheaper item further down the list might still fit.
+    if (budgetRemaining < item.cost) continue;
 
+    const dailyOutputSize = item.needsBackfill ? "full" : "compact";
+
+    await spaceOut();
     summary.attempted++;
-    const outcome = await fetchDailyAdjusted(env.ALPHA_VANTAGE_KEY, item.ticker, item.outputSize);
+    const dailyOutcome = await fetchDaily(env.ALPHA_VANTAGE_KEY, item.ticker, dailyOutputSize);
+    budgetRemaining--;
 
-    if (outcome.kind === "ok") {
-      const rows = outcome.rows.map((r) => ({ ...r, ticker: item.ticker }));
-      const upserted = await upsertPrices(env, rows);
-      await logFetch(env, {
-        ticker: item.ticker,
-        output_size: item.outputSize,
-        status: "ok",
-        rows_upserted: upserted,
-      });
-      summary.ok++;
-      summary.details.push({ ticker: item.ticker, outputSize: item.outputSize, status: "ok", rows: upserted });
-      continue;
-    }
-
-    if (outcome.kind === "rate_limited") {
-      await logFetch(env, {
-        ticker: item.ticker,
-        output_size: item.outputSize,
-        status: "rate_limited",
-        message: outcome.message,
-      });
+    if (dailyOutcome.kind === "rate_limited") {
+      await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "rate_limited", message: dailyOutcome.message });
       summary.rateLimited = true;
-      summary.details.push({ ticker: item.ticker, outputSize: item.outputSize, status: "rate_limited", message: outcome.message });
-      // AV signalled we're out of quota — no point continuing this run.
+      summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: "rate_limited", message: dailyOutcome.message });
       break;
     }
-
-    if (outcome.kind === "premium_gated") {
-      await logFetch(env, {
-        ticker: item.ticker,
-        output_size: item.outputSize,
-        status: "error",
-        message: `PREMIUM_GATED: ${outcome.message}`,
-      });
+    if (dailyOutcome.kind === "premium_gated") {
+      await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "error", message: `PREMIUM_GATED: ${dailyOutcome.message}` });
       summary.errors++;
       summary.premiumGated = true;
-      summary.details.push({ ticker: item.ticker, outputSize: item.outputSize, status: "premium_gated", message: outcome.message });
-      // Every other ticker will hit the exact same wall — stop early.
+      summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: "premium_gated", message: dailyOutcome.message });
       break;
     }
+    if (dailyOutcome.kind !== "ok") {
+      await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "error", message: dailyOutcome.message });
+      summary.errors++;
+      summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: dailyOutcome.kind, message: dailyOutcome.message });
+      continue; // no price data to adjust; move on to the next ticker
+    }
 
-    // invalid_symbol | error
-    await logFetch(env, {
-      ticker: item.ticker,
-      output_size: item.outputSize,
-      status: "error",
-      message: outcome.message,
-    });
-    summary.errors++;
-    summary.details.push({ ticker: item.ticker, outputSize: item.outputSize, status: outcome.kind, message: outcome.message });
+    const rows = dailyOutcome.rows.map((r) => ({ ...r, ticker: item.ticker }));
+    const upserted = await upsertPrices(env, rows);
+    await logFetch(env, { ticker: item.ticker, output_size: dailyOutputSize, status: "ok", rows_upserted: upserted });
+    summary.ok++;
+    summary.details.push({ ticker: item.ticker, requestKind: dailyOutputSize, status: "ok", rows: upserted });
+
+    let stopAfterThisItem = false;
+    if (item.needsSplitsRefresh) {
+      await spaceOut();
+      summary.attempted++;
+      const splitsOutcome = await fetchSplits(env.ALPHA_VANTAGE_KEY, item.ticker);
+      budgetRemaining--;
+
+      if (splitsOutcome.kind === "ok") {
+        await replaceSplits(env, item.ticker, splitsOutcome.splits);
+        await logFetch(env, { ticker: item.ticker, output_size: "splits", status: "ok", rows_upserted: splitsOutcome.splits.length });
+        summary.details.push({ ticker: item.ticker, requestKind: "splits", status: "ok", rows: splitsOutcome.splits.length });
+      } else if (splitsOutcome.kind === "rate_limited") {
+        await logFetch(env, { ticker: item.ticker, output_size: "splits", status: "rate_limited", message: splitsOutcome.message });
+        summary.rateLimited = true;
+        summary.details.push({ ticker: item.ticker, requestKind: "splits", status: "rate_limited", message: splitsOutcome.message });
+        stopAfterThisItem = true;
+      } else if (splitsOutcome.kind === "premium_gated") {
+        await logFetch(env, { ticker: item.ticker, output_size: "splits", status: "error", message: `PREMIUM_GATED: ${splitsOutcome.message}` });
+        summary.errors++;
+        summary.premiumGated = true;
+        summary.details.push({ ticker: item.ticker, requestKind: "splits", status: "premium_gated", message: splitsOutcome.message });
+        stopAfterThisItem = true;
+      } else {
+        await logFetch(env, { ticker: item.ticker, output_size: "splits", status: "error", message: splitsOutcome.message });
+        summary.errors++;
+        summary.details.push({ ticker: item.ticker, requestKind: "splits", status: splitsOutcome.kind, message: splitsOutcome.message });
+        // fall through: recompute with whatever splits we already had stored
+      }
+    }
+
+    // Recompute adjusted_close from raw close + currently-known splits,
+    // whether or not splits were refreshed this run.
+    await applySplitAdjustment(env, item.ticker);
+
+    if (stopAfterThisItem) break;
   }
 
   return summary;

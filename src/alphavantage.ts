@@ -1,12 +1,18 @@
-// Alpha Vantage client for TIME_SERIES_DAILY_ADJUSTED.
+// Alpha Vantage client.
 //
-// IMPORTANT / bitte beim Setup verifizieren (siehe README "Setup Schritt 2"
-// und GET /api/admin/test-fetch): Alpha Vantage hat die *_ADJUSTED-Endpunkte
-// zeitweise hinter einen "premium"-Hinweis gelegt, auch fuer Free-Tier-Keys.
-// Ob euer Key adjusted-Daten liefert, laesst sich nur mit einem echten Key
-// pruefen (dieses Sandbox-Environment hat keinen Netzwerkzugriff auf
-// alphavantage.co). Der Client erkennt diesen Fall (isPremiumGated) und
-// meldet ihn explizit, statt still falsche Daten zu verarbeiten.
+// IMPORTANT / verifiziert am 2026-08-05 mit einem echten Free-Tier-Key:
+// TIME_SERIES_DAILY_ADJUSTED ist fuer diesen Key hinter einen "premium
+// endpoint"-Hinweis gelegt (siehe premium_gated unten). Der Client faellt
+// deshalb standardmaessig auf eine Kombination aus zwei Endpunkten zurueck,
+// die auf dem Free Tier bestaetigt funktionieren:
+//   - TIME_SERIES_DAILY   (unadjusted Tageskurse)
+//   - SPLITS               (offizielle Split-Historie)
+// Daraus wird adjusted_close selbst rueckwirkend berechnet (siehe
+// applySplitAdjustment in db.ts). Das ist NUR split-, nicht
+// dividenden-bereinigt — siehe README fuer die Konsequenzen.
+//
+// fetchDailyAdjusted() bleibt erhalten (fuer /api/admin/test-fetch und
+// falls Alpha Vantage die Sperre fuer euren Key irgendwann aufhebt).
 
 import type { PriceRow } from "./types";
 
@@ -21,7 +27,14 @@ export type FetchOutcome =
   | { kind: "invalid_symbol"; message: string }
   | { kind: "error"; message: string };
 
-interface RawDailyPoint {
+export type SplitsOutcome =
+  | { kind: "ok"; splits: Array<{ effective_date: string; split_factor: number }> }
+  | { kind: "rate_limited"; message: string }
+  | { kind: "premium_gated"; message: string }
+  | { kind: "invalid_symbol"; message: string }
+  | { kind: "error"; message: string };
+
+interface RawDailyPointAdjusted {
   "1. open": string;
   "2. high": string;
   "3. low": string;
@@ -32,9 +45,25 @@ interface RawDailyPoint {
   "8. split coefficient": string;
 }
 
-interface RawResponse {
+interface RawDailyPointUnadjusted {
+  "1. open": string;
+  "2. high": string;
+  "3. low": string;
+  "4. close": string;
+  "5. volume": string;
+}
+
+interface RawTimeSeriesResponse<T> {
   "Meta Data"?: Record<string, string>;
-  "Time Series (Daily)"?: Record<string, RawDailyPoint>;
+  "Time Series (Daily)"?: Record<string, T>;
+  "Error Message"?: string;
+  Note?: string;
+  Information?: string;
+}
+
+interface RawSplitsResponse {
+  symbol?: string;
+  data?: Array<{ effective_date: string; split_factor: string }>;
   "Error Message"?: string;
   Note?: string;
   Information?: string;
@@ -46,49 +75,18 @@ function num(v: string | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export async function fetchDailyAdjusted(
-  apiKey: string,
-  ticker: string,
-  outputSize: OutputSize,
-): Promise<FetchOutcome> {
-  const url = new URL(BASE_URL);
-  url.searchParams.set("function", "TIME_SERIES_DAILY_ADJUSTED");
-  url.searchParams.set("symbol", ticker);
-  url.searchParams.set("outputsize", outputSize);
-  url.searchParams.set("datatype", "json");
-  url.searchParams.set("apikey", apiKey);
-
-  let res: Response;
-  try {
-    res = await fetch(url.toString(), {
-      headers: { "User-Agent": "momentum-screener-worker (analysis tool, non-trading)" },
-    });
-  } catch (err) {
-    return { kind: "error", message: `Netzwerkfehler beim Alpha-Vantage-Request: ${String(err)}` };
-  }
-
-  if (!res.ok) {
-    return { kind: "error", message: `HTTP ${res.status} von Alpha Vantage fuer ${ticker}` };
-  }
-
-  let data: RawResponse;
-  try {
-    data = (await res.json()) as RawResponse;
-  } catch (err) {
-    return { kind: "error", message: `Antwort von Alpha Vantage war kein valides JSON: ${String(err)}` };
-  }
-
+/** Shared classification of Alpha Vantage's error/rate-limit/premium wrapper fields. */
+function classifyError(data: {
+  "Error Message"?: string;
+  Note?: string;
+  Information?: string;
+}): { kind: "invalid_symbol" | "rate_limited" | "premium_gated"; message: string } | null {
   if (data["Error Message"]) {
     return { kind: "invalid_symbol", message: data["Error Message"] };
   }
-
-  // Free-tier rate limit hit (classic wording: "Note").
   if (data.Note) {
     return { kind: "rate_limited", message: data.Note };
   }
-
-  // Newer Alpha Vantage responses use "Information" both for rate limits
-  // *and* for "this is a premium endpoint" notices — disambiguate by text.
   if (data.Information) {
     const lower = data.Information.toLowerCase();
     if (lower.includes("premium")) {
@@ -96,13 +94,48 @@ export async function fetchDailyAdjusted(
     }
     return { kind: "rate_limited", message: data.Information };
   }
+  return null;
+}
 
-  const series = data["Time Series (Daily)"];
+async function fetchJson<T>(params: Record<string, string>): Promise<{ ok: true; data: T } | { ok: false; message: string }> {
+  const url = new URL(BASE_URL);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), {
+      headers: { "User-Agent": "momentum-screener-worker (analysis tool, non-trading)" },
+    });
+  } catch (err) {
+    return { ok: false, message: `Netzwerkfehler beim Alpha-Vantage-Request: ${String(err)}` };
+  }
+  if (!res.ok) {
+    return { ok: false, message: `HTTP ${res.status} von Alpha Vantage` };
+  }
+  try {
+    return { ok: true, data: (await res.json()) as T };
+  } catch (err) {
+    return { ok: false, message: `Antwort von Alpha Vantage war kein valides JSON: ${String(err)}` };
+  }
+}
+
+/** TIME_SERIES_DAILY_ADJUSTED — kept for /api/admin/test-fetch and in case the key's access changes. */
+export async function fetchDailyAdjusted(apiKey: string, ticker: string, outputSize: OutputSize): Promise<FetchOutcome> {
+  const result = await fetchJson<RawTimeSeriesResponse<RawDailyPointAdjusted>>({
+    function: "TIME_SERIES_DAILY_ADJUSTED",
+    symbol: ticker,
+    outputsize: outputSize,
+    datatype: "json",
+    apikey: apiKey,
+  });
+  if (!result.ok) return { kind: "error", message: result.message };
+
+  const err = classifyError(result.data);
+  if (err) return err;
+
+  const series = result.data["Time Series (Daily)"];
   if (!series) {
-    return {
-      kind: "error",
-      message: "Unerwartete Antwortstruktur: kein 'Time Series (Daily)'-Feld vorhanden.",
-    };
+    return { kind: "error", message: "Unerwartete Antwortstruktur: kein 'Time Series (Daily)'-Feld vorhanden." };
   }
 
   const rows: PriceRow[] = Object.entries(series).map(([date, p]) => ({
@@ -119,6 +152,71 @@ export async function fetchDailyAdjusted(
   }));
 
   return { kind: "ok", rows };
+}
+
+/**
+ * TIME_SERIES_DAILY (unadjusted) — the free-tier fallback used by default.
+ * `adjusted_close` is set equal to `close` here; the caller (db.ts /
+ * applySplitAdjustment) overwrites it once splits are known.
+ */
+export async function fetchDaily(apiKey: string, ticker: string, outputSize: OutputSize): Promise<FetchOutcome> {
+  const result = await fetchJson<RawTimeSeriesResponse<RawDailyPointUnadjusted>>({
+    function: "TIME_SERIES_DAILY",
+    symbol: ticker,
+    outputsize: outputSize,
+    datatype: "json",
+    apikey: apiKey,
+  });
+  if (!result.ok) return { kind: "error", message: result.message };
+
+  const err = classifyError(result.data);
+  if (err) return err;
+
+  const series = result.data["Time Series (Daily)"];
+  if (!series) {
+    return { kind: "error", message: "Unerwartete Antwortstruktur: kein 'Time Series (Daily)'-Feld vorhanden." };
+  }
+
+  const rows: PriceRow[] = Object.entries(series).map(([date, p]) => {
+    const close = num(p["4. close"]) ?? 0;
+    return {
+      ticker,
+      date,
+      open: num(p["1. open"]),
+      high: num(p["2. high"]),
+      low: num(p["3. low"]),
+      close,
+      adjusted_close: close, // placeholder; overwritten by applySplitAdjustment
+      volume: p["5. volume"] ? Math.trunc(Number(p["5. volume"])) : null,
+      dividend_amount: null,
+      split_coefficient: null,
+    };
+  });
+
+  return { kind: "ok", rows };
+}
+
+/** SPLITS — official split history, used to back-adjust the unadjusted daily closes. */
+export async function fetchSplits(apiKey: string, ticker: string): Promise<SplitsOutcome> {
+  const result = await fetchJson<RawSplitsResponse>({
+    function: "SPLITS",
+    symbol: ticker,
+    apikey: apiKey,
+  });
+  if (!result.ok) return { kind: "error", message: result.message };
+
+  const err = classifyError(result.data);
+  if (err) return err;
+
+  if (!Array.isArray(result.data.data)) {
+    return { kind: "error", message: "Unerwartete Antwortstruktur: kein 'data'-Feld vorhanden." };
+  }
+
+  const splits = result.data.data
+    .map((s) => ({ effective_date: s.effective_date, split_factor: Number(s.split_factor) }))
+    .filter((s) => s.effective_date && Number.isFinite(s.split_factor) && s.split_factor > 0);
+
+  return { kind: "ok", splits };
 }
 
 /** Simple sleep helper for spacing requests to respect the 5 req/min free-tier limit. */

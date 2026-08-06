@@ -1,12 +1,14 @@
 // D1 access helpers. Keeps raw SQL in one place so the rest of the code
 // works with plain TS objects/arrays.
 
+import { computeAdjustedCloses } from "./splitAdjustment";
 import type {
   BacktestParams,
   BacktestRunOutput,
   Env,
   PricePoint,
   PriceRow,
+  SplitRow,
   WatchlistEntry,
 } from "./types";
 
@@ -103,11 +105,67 @@ export async function upsertPrices(env: Env, rows: PriceRow[]): Promise<number> 
   return total;
 }
 
+/** Raw (unadjusted) close-price series for a ticker, ascending by date — input to applySplitAdjustment. */
+export async function getRawPriceSeries(env: Env, ticker: string): Promise<Array<{ date: string; close: number | null }>> {
+  const { results } = await env.DB.prepare(
+    "SELECT date, close FROM prices WHERE ticker = ? ORDER BY date ASC",
+  )
+    .bind(ticker)
+    .all<{ date: string; close: number | null }>();
+  return results ?? [];
+}
+
+/** Replaces the stored split history for one ticker with the freshly fetched list (authoritative source wins). */
+export async function replaceSplits(env: Env, ticker: string, splits: Array<{ effective_date: string; split_factor: number }>): Promise<void> {
+  await env.DB.prepare("DELETE FROM splits WHERE ticker = ?").bind(ticker).run();
+  if (splits.length === 0) return;
+  const stmt = env.DB.prepare(
+    "INSERT INTO splits (ticker, effective_date, split_factor) VALUES (?, ?, ?)",
+  );
+  await env.DB.batch(splits.map((s) => stmt.bind(ticker, s.effective_date, s.split_factor)));
+}
+
+/** Stored split history for a ticker, ascending by effective_date. */
+export async function getSplits(env: Env, ticker: string): Promise<SplitRow[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT ticker, effective_date, split_factor FROM splits WHERE ticker = ? ORDER BY effective_date ASC",
+  )
+    .bind(ticker)
+    .all<SplitRow>();
+  return results ?? [];
+}
+
+/**
+ * Recomputes `adjusted_close` for every stored price row of `ticker` from
+ * the raw `close` column and the ticker's known split history: every price
+ * dated before a split gets divided by that split's factor (and by every
+ * later split's factor too, cumulatively) so historical prices are
+ * comparable to today's post-split scale. This is SPLIT-adjustment only —
+ * no dividend reinvestment is modeled (see README).
+ */
+export async function applySplitAdjustment(env: Env, ticker: string): Promise<number> {
+  const [splits, prices] = await Promise.all([getSplits(env, ticker), getRawPriceSeries(env, ticker)]);
+  if (prices.length === 0) return 0;
+
+  const adjusted = computeAdjustedCloses(prices, splits);
+
+  const stmt = env.DB.prepare("UPDATE prices SET adjusted_close = ? WHERE ticker = ? AND date = ?");
+  const updates = adjusted
+    .filter((row) => row.adjusted_close !== null)
+    .map((row) => stmt.bind(row.adjusted_close, ticker, row.date));
+
+  const CHUNK = 500;
+  for (let i = 0; i < updates.length; i += CHUNK) {
+    await env.DB.batch(updates.slice(i, i + CHUNK));
+  }
+  return updates.length;
+}
+
 export async function logFetch(
   env: Env,
   entry: {
     ticker: string;
-    output_size: "full" | "compact";
+    output_size: "full" | "compact" | "splits";
     status: "ok" | "error" | "rate_limited" | "skipped_budget";
     message?: string;
     rows_upserted?: number;
@@ -135,6 +193,18 @@ export async function countRequestsToday(env: Env): Promise<number> {
        AND date(fetched_at) = date('now')`,
   ).first<{ n: number }>();
   return row?.n ?? 0;
+}
+
+/** Most recent successful SPLITS fetch for a ticker (used to throttle how often we re-check split history). */
+export async function getLastSplitsFetchAt(env: Env, ticker: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT fetched_at FROM fetch_log
+     WHERE ticker = ? AND output_size = 'splits' AND status = 'ok'
+     ORDER BY fetched_at DESC LIMIT 1`,
+  )
+    .bind(ticker)
+    .first<{ fetched_at: string }>();
+  return row?.fetched_at ?? null;
 }
 
 export async function hasFetchedOkToday(env: Env, ticker: string): Promise<boolean> {

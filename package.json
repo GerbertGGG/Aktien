@@ -8,7 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/backtest.smoke.test.ts",
+    "test": "tsx test/backtest.smoke.test.ts && tsx test/splitAdjustment.smoke.test.ts",
     "db:create": "wrangler d1 create momentum-screener-db",
     "db:migrate:local": "wrangler d1 migrations apply momentum-screener-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply momentum-screener-db --remote",

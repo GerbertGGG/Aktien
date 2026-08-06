@@ -34,6 +34,12 @@ export interface WatchlistEntry {
   added_at: string;
 }
 
+export interface SplitRow {
+  ticker: string;
+  effective_date: string; // ISO yyyy-mm-dd
+  split_factor: number; // e.g. 10 for a 10:1 split
+}
+
 export interface PriceRow {
   ticker: string;
   date: string; // ISO yyyy-mm-dd

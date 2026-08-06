@@ -17,25 +17,26 @@ backtestet dieses Signal historisch gegen einen Buy-&-Hold-Benchmark (SPY).
 | **D1 (SQLite)** | Watchlist, Kursdaten, Backtest-Ergebnisse |
 | **Cron Trigger** | taegliches Preis-Update, 22:00 UTC |
 | **Worker Static Assets** (`public/`) | Dashboard (Vanilla HTML/CSS/JS, keine externen Abhaengigkeiten) |
-| **Alpha Vantage** | Kursdatenquelle (`TIME_SERIES_DAILY_ADJUSTED`, Free Tier) |
+| **Alpha Vantage** | Kursdatenquelle (`TIME_SERIES_DAILY` + `SPLITS`, Free Tier — siehe Datenquelle-Abschnitt unten) |
 
 ```
 src/
-  index.ts        Worker-Entry: HTTP-Routing + scheduled()-Handler
-  alphavantage.ts  Alpha-Vantage-Client (Fetch, Fehler-/Rate-Limit-Erkennung)
-  cron.ts          Tages-Update-Logik (Backfill + Rate-Limit-Budget)
-  db.ts            Alle D1-Zugriffe (Lesen/Schreiben) an einem Ort
-  dates.ts         Kalender-Arithmetik (Monats-Offsets, Monatsende)
-  priceIndex.ts    Binaersuche "Kurs am/vor Datum X" pro Ticker
-  momentum.ts      12-1-Momentum-Formel (pure function)
-  screener.ts       Live-Ranking der Watchlist
-  stats.ts         CAGR / Sharpe / Max Drawdown / Volatilitaet (pure functions)
-  backtest.ts      Backtest-Engine (Rebalancing, Kosten, Out-of-Sample-Split)
-  api/*.ts         HTTP-Handler pro Route
+  index.ts          Worker-Entry: HTTP-Routing + scheduled()-Handler
+  alphavantage.ts    Alpha-Vantage-Client (Fetch, Fehler-/Rate-Limit-Erkennung)
+  cron.ts            Tages-Update-Logik (Backfill + Rate-Limit-Budget)
+  db.ts              Alle D1-Zugriffe (Lesen/Schreiben) an einem Ort
+  dates.ts           Kalender-Arithmetik (Monats-Offsets, Monatsende)
+  priceIndex.ts      Binaersuche "Kurs am/vor Datum X" pro Ticker
+  momentum.ts        12-1-Momentum-Formel (pure function)
+  splitAdjustment.ts Split-Bereinigung aus rohen Kursen + Split-Historie (pure function)
+  screener.ts        Live-Ranking der Watchlist
+  stats.ts           CAGR / Sharpe / Max Drawdown / Volatilitaet (pure functions)
+  backtest.ts        Backtest-Engine (Rebalancing, Kosten, Out-of-Sample-Split)
+  api/*.ts           HTTP-Handler pro Route
 public/            Dashboard (index.html, app.js, style.css)
 migrations/        D1-Schema
 scripts/           Watchlist-Seed
-test/              Smoke-Test der Backtest-/Momentum-Mathematik (`npm test`)
+test/              Smoke-Tests der Backtest-/Momentum-/Split-Mathematik (`npm test`)
 ```
 
 ## Setup
@@ -74,26 +75,45 @@ Nach dem ersten `npm run deploy` (siehe unten) den Key gegen die echte
 Alpha-Vantage-API testen, **ohne** dabei etwas in D1 zu schreiben:
 
 ```bash
-curl "https://DEIN-WORKER.workers.dev/api/admin/test-fetch?ticker=AAPL&outputsize=compact"
+curl "https://DEIN-WORKER.workers.dev/api/admin/test-fetch?ticker=AAPL&function=daily&outputsize=compact"
+curl "https://DEIN-WORKER.workers.dev/api/admin/test-fetch?ticker=NVDA&function=splits"
 ```
 
-**Wichtig, bitte hier wirklich pruefen:** Alpha Vantage hat die
-`*_ADJUSTED`-Endpunkte (inkl. `TIME_SERIES_DAILY_ADJUSTED`, den dieses Projekt
-fuer split-/dividenden-bereinigte Kurse braucht) zeitweise auch fuer
-Free-Tier-Keys hinter einen "premium endpoint"-Hinweis gelegt. Der obige
-Test-Call zeigt das sofort: Antwort `"kind": "premium_gated"` bedeutet, euer
-Key liefert keine adjusted-Daten. In dem Fall:
-- Prueft auf https://www.alphavantage.co/premium/, ob der Free Tier aktuell
-  noch adjusted-Daten enthaelt (aendert sich laut Community-Berichten
-  gelegentlich),
-- oder stellt den Client auf den unadjusted Endpoint `TIME_SERIES_DAILY` um
-  (Anpassung in `src/alphavantage.ts` + `src/cron.ts`) — dann fehlt aber die
-  Split-/Dividenden-Bereinigung, was Backtest-Ergebnisse rund um
-  Aktien-Splits verzerrt (klare Sprünge im Kurs, die keine echte Kursbewegung
-  sind).
+**Bekannte Einschraenkung, bereits eingebaut:** Alpha Vantage legt den
+Endpunkt `TIME_SERIES_DAILY_ADJUSTED` (split-/dividenden-bereinigte Kurse in
+einem Request) fuer manche Free-Tier-Keys hinter einen "premium
+endpoint"-Hinweis — verifiziert am 2026-08-05 mit einem echten Key. Deshalb
+nutzt der Cron-Job standardmaessig **nicht** diesen Endpunkt, sondern eine
+Kombination aus zwei bestaetigt frei zugaenglichen Endpunkten:
 
-Der Status-Endpoint (`/api/status`, auch im Dashboard sichtbar) zeigt eine
-Warnung, sobald der Cron-Job einen `premium_gated`-Fehler geloggt hat.
+- `TIME_SERIES_DAILY` — unadjusted Tageskurse
+- `SPLITS` — offizielle Split-Historie pro Ticker
+
+Daraus berechnet der Worker `adjusted_close` selbst rueckwirkend
+(`src/splitAdjustment.ts`: jeder Kurs vor einem Split wird durch den
+kumulierten Split-Faktor aller spaeteren Splits geteilt — Standardmethode,
+per Unit-Test gegen NVDAs echte 4:1/10:1-Splits verifiziert). **Wichtige
+Einschraenkung:** das ist nur **split-bereinigt, nicht dividenden-bereinigt**
+— im Gegensatz zu `TIME_SERIES_DAILY_ADJUSTED`. Fuer die Mega-Cap-Watchlist
+bedeutet das eine systematische Unterschaetzung des Total Return um grob
+1-2 %/Jahr (Dividendenrendite), UND zwar gleichermassen fuer Strategie- wie
+fuer Benchmark-Ticker, was den relativen Vergleich (CAGR-Differenz) weniger
+verzerrt als das absolute CAGR selbst. Momentum-Ranking (12-1-Return) ist
+davon nur marginal betroffen, da Dividendenrenditen ueber alle Watchlist-
+Ticker hinweg vergleichsweise aehnlich sind — anders als Aktien-Splits, die
+ohne Bereinigung wie ein -90 %-Crash aussehen wuerden.
+
+Falls Alpha Vantage die Sperre fuer euren Key irgendwann aufhebt: mit
+`function=adjusted` im Test-Call pruefen; `fetchDailyAdjusted()` in
+`src/alphavantage.ts` ist weiterhin vorhanden, wird vom Cron-Job aber aktuell
+nicht mehr automatisch genutzt (muesste in `src/cron.ts` wieder verdrahtet
+werden).
+
+Der Status-Endpoint (`/api/status`, auch im Dashboard als Banner sichtbar)
+zeigt permanent den aktiven `data_mode` sowie eine zusaetzliche Warnung,
+sobald der Cron-Job einen `premium_gated`-Fehler loggt (z.B. falls auch
+`TIME_SERIES_DAILY` oder `SPLITS` fuer einen anderen Key gesperrt sein
+sollte).
 
 ### 3. Watchlist befuellen
 
@@ -136,10 +156,12 @@ curl -X POST "https://DEIN-WORKER.workers.dev/api/admin/run-update"
 ```
 
 Das laedt fuer jeden Ticker ohne Historie die komplette verfuegbare
-Kurshistorie (`outputsize=full`, ein Request pro Ticker) — bei 21 Tickern
-(20 Watchlist + SPY) passt das in ein einzelnes Tagesbudget von 25
-Requests, dauert wegen der Drosselung auf 5 Requests/Minute aber ca. 4-5
-Minuten. Details siehe `src/cron.ts`.
+Kurshistorie plus dessen Split-Historie (`outputsize=full` + `SPLITS`, **2
+Requests pro neuem Ticker**) — bei 21 Tickern (20 Watchlist + SPY) sind das
+42 Requests, was das Tagesbudget von 25 ueberschreitet. Der Cron-Job bedient
+die wertvollsten Posten zuerst (Backfills vor Updates) und macht am
+naechsten Tag automatisch weiter, wo er aufgehoert hat — der vollstaendige
+Erst-Backfill dauert also **~2 Tage**. Details siehe `src/cron.ts`.
 
 ### 6. Backtest berechnen
 
@@ -208,19 +230,27 @@ Backtest-Lauf per `POST /api/backtest/run`-Body ueberschreibbar:
 
 ## Rate-Limiting (Alpha Vantage Free Tier: 5 Requests/Min, 25/Tag)
 
-`src/cron.ts` haelt sich daran:
-- Tickers ohne (ausreichende) Historie bekommen einmalig `outputsize=full`
-  (komplette Historie in einem Request).
-- Tickers mit ausreichender Historie bekommen taeglich nur `outputsize=compact`
-  (letzte ~100 Tage) — korrigiert nebenbei eventuelle nachtraegliche
-  Kurskorrekturen von Alpha Vantage.
+`src/cron.ts` haelt sich daran, jetzt auf Request- statt Ticker-Ebene
+budgetiert (jeder Ticker kostet 1 oder 2 Requests, siehe oben):
+- Tickers ohne (ausreichende) Historie bekommen einmalig `TIME_SERIES_DAILY`
+  mit `outputsize=full` (komplette Historie) **plus** die volle
+  `SPLITS`-Historie — 2 Requests.
+- Tickers mit ausreichender Historie bekommen taeglich nur
+  `outputsize=compact` (letzte ~100 Tage, 1 Request) — korrigiert nebenbei
+  eventuelle nachtraegliche Kurskorrekturen von Alpha Vantage. Ihre
+  Split-Historie wird nur alle ~30 Tage neu abgefragt (Splits sind selten),
+  an diesen Tagen kostet der Ticker dann ebenfalls 2 Requests.
+- Nach jedem erfolgreichen Kurs-Fetch wird `adjusted_close` lokal aus
+  `close` + der zuletzt bekannten Split-Historie neu berechnet
+  (`applySplitAdjustment`) — auch an Tagen ohne Splits-Refresh.
 - Requests werden mit >12 Sekunden Abstand gestellt (bleibt unter 5/Min).
 - Ein taegliches Budget (`MAX_REQUESTS_PER_DAY`, Default 25) wird ueber die
-  `fetch_log`-Tabelle nachverfolgt; reicht das Budget nicht fuer alle
-  faelligen Ticker, werden die am laengsten nicht aktualisierten zuerst
-  bedient — der Rest folgt am naechsten Tag automatisch.
-- Meldet Alpha Vantage `rate_limited`, bricht der Lauf sofort ab (kein
-  sinnloses Weiterprobieren).
+  `fetch_log`-Tabelle nachverfolgt; ein Ticker, dessen Kosten nicht mehr ins
+  verbleibende Budget passen, wird uebersprungen (nicht der ganze Lauf
+  abgebrochen) — ein guenstigerer Ticker weiter hinten in der Liste bekommt
+  so noch eine Chance. Am naechsten Tag geht es automatisch weiter.
+- Meldet Alpha Vantage `rate_limited` oder `premium_gated`, bricht der Lauf
+  sofort ab (kein sinnloses Weiterprobieren).
 
 ## API
 
@@ -231,7 +261,7 @@ Backtest-Lauf per `POST /api/backtest/run`-Body ueberschreibbar:
 | `/api/backtest/latest` | GET | letztes gespeichertes Backtest-Ergebnis (alle 3 Splits) |
 | `/api/backtest/run` | POST | Backtest neu berechnen + speichern (Body: `Partial<BacktestParams>`, optional) |
 | `/api/status` | GET | Rate-Limit-Budget, Fetch-Log, Watchlist-Zaehler |
-| `/api/admin/test-fetch` | GET | roher Alpha-Vantage-Testaufruf (schreibt nichts in D1) |
+| `/api/admin/test-fetch` | GET | roher Alpha-Vantage-Testaufruf, `?function=daily\|splits\|adjusted` (schreibt nichts in D1) |
 | `/api/admin/run-update` | POST | Preis-Update manuell ausloesen (= Cron-Logik) |
 
 ## Lokale Entwicklung
@@ -250,14 +280,16 @@ via `curl http://localhost:8787/api/admin/run-update` (POST) oder
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # Smoke-Test der Backtest-/Momentum-Mathematik (synthetische Kursreihen)
+npm test            # Smoke-Tests: Backtest-/Momentum-Mathematik + Split-Bereinigung
 ```
 
 `npm test` prueft u.a.: korrekte Monats-Arithmetik (inkl. 31-Tage-Monats-
 Randfaelle), dass die Engine bei eindeutig ueberlegenem Momentum immer den
 richtigen Ticker waehlt, dass Transaktionskosten nur bei tatsaechlichem
 Turnover anfallen, dass Benchmark-Equity unabhaengig von der Strategie ist,
-Sharpe/CAGR/Max-Drawdown-Formeln gegen geschlossene Loesungen, und dass der
+Sharpe/CAGR/Max-Drawdown-Formeln gegen geschlossene Loesungen, die
+Split-Bereinigung gegen NVDAs echte 4:1/10:1-Splits (live per
+`/api/admin/test-fetch?function=splits` verifiziert), und dass der
 Out-of-Sample-Split die Perioden ueberlappungsfrei aufteilt.
 
 ## Bewusst nicht gebaut
@@ -272,5 +304,6 @@ Out-of-Sample-Split die Perioden ueberlappungsfrei aufteilt.
 ## Lizenz / Datenquelle
 
 Kursdaten: [Alpha Vantage](https://www.alphavantage.co/) (Free Tier,
-`TIME_SERIES_DAILY_ADJUSTED`). Bitte die Nutzungsbedingungen von Alpha
-Vantage beachten, insbesondere bei Weitergabe der Daten.
+`TIME_SERIES_DAILY` + `SPLITS`, lokal split-bereinigt — siehe "Setup Schritt
+2" fuer den Hintergrund). Bitte die Nutzungsbedingungen von Alpha Vantage
+beachten, insbesondere bei Weitergabe der Daten.

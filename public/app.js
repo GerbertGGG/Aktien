@@ -214,12 +214,16 @@ async function loadStatus() {
       `Alpha-Vantage-Budget heute: ${data.requests_used_today}/${data.requests_budget_per_day} verbraucht ` +
       `(${data.requests_remaining_today} verbleibend).`;
 
-    const warnEl = $("premium-warning");
+    const modeEl = $("data-mode-banner");
     if (data.premium_gated_warning) {
-      warnEl.textContent = data.premium_gated_warning;
-      warnEl.style.display = "block";
+      modeEl.textContent = `${data.data_mode} ${data.premium_gated_warning}`;
+      modeEl.classList.add("alert");
+    } else if (data.data_mode) {
+      modeEl.textContent = data.data_mode;
+      modeEl.classList.remove("alert");
     } else {
-      warnEl.style.display = "none";
+      modeEl.textContent = "";
+      modeEl.style.display = "none";
     }
 
     $("fetch-log").textContent = JSON.stringify(data.recent_fetch_log, null, 2);
