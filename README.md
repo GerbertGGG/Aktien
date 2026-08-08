@@ -135,6 +135,21 @@ zeigt permanent den aktiven `data_mode` sowie eine zusaetzliche Warnung,
 sobald der Cron-Job einen `premium_gated`-Fehler loggt (z.B. falls auch einer
 der drei genutzten Endpunkte fuer einen anderen Key gesperrt sein sollte).
 
+> **Fallstrick beim Debuggen (bereits gefixt, aber gut zu wissen):** Fast
+> jede Alpha-Vantage-Fehlermeldung endet mit einer "Sie koennen ein
+> Premium-Paket abonnieren..."-Werbezeile — auch ganz normale
+> Tageslimit-Meldungen ("our standard API rate limit is 25 requests per
+> day..."), die nichts mit einer echten Endpunkt-Sperre zu tun haben. Eine
+> fruehe Version von `classifyError()` (`src/alphavantage.ts`) hat jede
+> Meldung mit "premium" als `premium_gated` eingestuft und damit
+> Kontingent-Erschoepfung durch Testaufrufe (Browser + Worker + Cron parallel
+> gegen denselben Key) faelschlich als "Endpunkt gesperrt" gemeldet. Nur
+> Meldungen, die explizit ein Feature/Parameter/Endpoint als premium-only
+> benennen (z.B. "outputsize=full ... is a premium feature"), gelten jetzt
+> als `premium_gated`; alles mit Tageslimit-/Volumen-Wortlaut gilt als
+> `rate_limited`. Testfaelle mit den echten Original-Fehlermeldungen: siehe
+> `test/alphavantageClassify.smoke.test.ts`.
+
 ### 3. Watchlist befuellen
 
 ```bash
@@ -304,7 +319,7 @@ via `curl http://localhost:8787/api/admin/run-update` (POST) oder
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # Smoke-Tests: Backtest-/Momentum-Mathematik + Split-Bereinigung
+npm test            # Smoke-Tests: Backtest-/Momentum-Mathematik + Split-Bereinigung + AV-Fehlerklassifizierung
 ```
 
 `npm test` prueft u.a.: korrekte Monats-Arithmetik (inkl. 31-Tage-Monats-
@@ -313,8 +328,11 @@ richtigen Ticker waehlt, dass Transaktionskosten nur bei tatsaechlichem
 Turnover anfallen, dass Benchmark-Equity unabhaengig von der Strategie ist,
 Sharpe/CAGR/Max-Drawdown-Formeln gegen geschlossene Loesungen, die
 Split-Bereinigung gegen NVDAs echte 4:1/10:1-Splits (live per
-`/api/admin/test-fetch?function=splits` verifiziert), und dass der
-Out-of-Sample-Split die Perioden ueberlappungsfrei aufteilt.
+`/api/admin/test-fetch?function=splits` verifiziert), dass Alpha Vantages
+Fehlermeldungen korrekt in Rate-Limit vs. echtes Feature-Gating klassifiziert
+werden (gegen die realen Original-Fehlermeldungen aus der Diagnose vom
+2026-08-08), und dass der Out-of-Sample-Split die Perioden
+ueberlappungsfrei aufteilt.
 
 ## Bewusst nicht gebaut
 

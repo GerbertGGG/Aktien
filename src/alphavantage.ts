@@ -83,8 +83,25 @@ function num(v: string | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Shared classification of Alpha Vantage's error/rate-limit/premium wrapper fields. */
-function classifyError(data: {
+/**
+ * Shared classification of Alpha Vantage's error/rate-limit/premium wrapper
+ * fields.
+ *
+ * IMPORTANT: virtually EVERY Alpha Vantage "Note"/"Information" message ends
+ * with a "you may subscribe to any of the premium plans..." upsell footer —
+ * including plain daily/per-minute rate-limit notices that have nothing to
+ * do with a specific endpoint or parameter being feature-gated. An earlier
+ * version of this function classified anything containing "premium" as
+ * `premium_gated`, which misdiagnosed ordinary quota exhaustion (confirmed
+ * 2026-08-08: "our standard API rate limit is 25 requests per day... you may
+ * subscribe to premium plans to remove all daily rate limits") as if the
+ * endpoint itself were gated. Only messages that explicitly call out a
+ * specific feature/parameter/endpoint as premium-only (e.g. "The
+ * outputsize=full parameter value is a premium feature", confirmed genuinely
+ * gated) are classified as `premium_gated`; everything else that smells like
+ * a quota/volume message is `rate_limited`.
+ */
+export function classifyError(data: {
   "Error Message"?: string;
   Note?: string;
   Information?: string;
@@ -92,17 +109,31 @@ function classifyError(data: {
   if (data["Error Message"]) {
     return { kind: "invalid_symbol", message: data["Error Message"] };
   }
-  if (data.Note) {
-    return { kind: "rate_limited", message: data.Note };
+
+  const noteOrInfo = data.Note ?? data.Information;
+  if (!noteOrInfo) return null;
+
+  const lower = noteOrInfo.toLowerCase();
+
+  const looksLikeQuota =
+    lower.includes("requests per day") ||
+    lower.includes("requests per minute") ||
+    lower.includes("request per second") ||
+    lower.includes("rate limit") ||
+    lower.includes("call frequency") ||
+    lower.includes("call volume") ||
+    lower.includes("spreading out") ||
+    lower.includes("detected your api key");
+
+  const looksLikeFeatureGating =
+    lower.includes("is a premium feature") ||
+    lower.includes("premium endpoint") ||
+    lower.includes("premium-only");
+
+  if (looksLikeFeatureGating && !looksLikeQuota) {
+    return { kind: "premium_gated", message: noteOrInfo };
   }
-  if (data.Information) {
-    const lower = data.Information.toLowerCase();
-    if (lower.includes("premium")) {
-      return { kind: "premium_gated", message: data.Information };
-    }
-    return { kind: "rate_limited", message: data.Information };
-  }
-  return null;
+  return { kind: "rate_limited", message: noteOrInfo };
 }
 
 async function fetchJson<T>(params: Record<string, string>): Promise<{ ok: true; data: T } | { ok: false; message: string }> {
