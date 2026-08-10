@@ -211,12 +211,13 @@ async function loadStatus() {
     const data = await fetchJSON("/api/status");
     $("status-summary").textContent =
       `Watchlist: ${data.active_count}/${data.watchlist_count} aktiv · ` +
-      `Alpha-Vantage-Budget heute: ${data.requests_used_today}/${data.requests_budget_per_day} verbraucht ` +
+      `Twelve-Data-Budget heute: ${data.requests_used_today}/${data.requests_budget_per_day} verbraucht ` +
       `(${data.requests_remaining_today} verbleibend).`;
 
     const modeEl = $("data-mode-banner");
-    if (data.premium_gated_warning) {
-      modeEl.textContent = `${data.data_mode} ${data.premium_gated_warning}`;
+    if (data.recent_problem) {
+      const p = data.recent_problem;
+      modeEl.textContent = `${data.data_mode} Letztes Problem (${p.ticker}, ${p.status}, ${p.fetched_at}): ${p.message}`;
       modeEl.classList.add("alert");
     } else if (data.data_mode) {
       modeEl.textContent = data.data_mode;

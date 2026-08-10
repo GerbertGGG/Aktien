@@ -43,7 +43,9 @@ DEFAULT_SKIP_MONTHS = "1"
 DEFAULT_TX_COST_BPS = "10"
 DEFAULT_RISK_FREE_RATE = "0.04"
 DEFAULT_OOS_SPLIT = "0.7"
-MAX_REQUESTS_PER_DAY = "25"
-MAX_REQUESTS_PER_MINUTE = "5"
+# Twelve Data free tier (verify against your own account at
+# https://twelvedata.com/pricing and adjust here if different):
+MAX_REQUESTS_PER_DAY = "800"
+MAX_REQUESTS_PER_MINUTE = "8"
 
-# Secret (do NOT put here): set via `wrangler secret put ALPHA_VANTAGE_KEY`
+# Secret (do NOT put here): set via `wrangler secret put TWELVE_DATA_KEY`

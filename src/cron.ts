@@ -2,37 +2,29 @@
 // 22:00 UTC) via the `scheduled` handler in index.ts, and callable manually
 // via POST /api/admin/run-update for local testing.
 //
-// Data source (verified 2026-08-05/06 against a real free-tier key):
-//   - TIME_SERIES_DAILY_ADJUSTED           -> premium-gated
-//   - TIME_SERIES_DAILY, outputsize=full   -> ALSO premium-gated
-//     ("The outputsize=full parameter value is a premium feature")
-//   - TIME_SERIES_DAILY, outputsize=compact -> free (last ~100 trading days)
-//   - TIME_SERIES_MONTHLY                   -> free, and always returns the
-//     FULL available history (no outputsize param) — confirmed going back
-//     years for AAPL.
-//   - SPLITS                                -> free
+// Data source: Twelve Data (see README "Datenquelle" for why we moved off
+// Alpha Vantage). Twelve Data's `time_series` endpoint documents up to 5000
+// bars per request even on the free plan, so — unlike Alpha Vantage, where
+// only the last ~100 days were free and a full-history request was
+// premium-only — a single request can backfill years of daily history.
 //
-// So a one-shot "give me 20 years of daily data" backfill isn't available
-// on this tier at all. Instead:
-//   - Once per ticker: TIME_SERIES_MONTHLY (years of history, 1 request)
-//     + SPLITS (1 request) = 2 requests, never repeated.
-//   - Every day after that: TIME_SERIES_DAILY compact (1 request) layers
-//     precise recent data on top of the monthly backbone; SPLITS is
-//     re-checked only every ~30 days (splits are rare).
-// One monthly close per calendar month is exactly what the momentum signal
-// (12-1, monthly-sampled) and the monthly-rebalancing backtest need, so
-// PriceIndex/momentum/backtest required NO changes for this — they already
-// do point-in-time "closest date on-or-before" lookups over whatever mix of
-// monthly/daily rows happens to be stored.
+// Per-ticker strategy:
+//   - One-time (gated by hasEverFetchedOk 'daily_full', not a row-count
+//     heuristic): TIME_SERIES daily with a large outputsize (years of
+//     history) + SPLITS — 2 requests, never repeated.
+//   - Every day after: a small daily outputsize (~100 bars) — 1 request —
+//     to catch up and self-correct recent data; SPLITS is only re-checked
+//     every ~30 days (splits are rare).
 //
-// Rate-limit strategy (Alpha Vantage free tier: 5 req/min, 25 req/day):
-// every individual HTTP request is spaced >12s apart and counted against
-// the daily budget; items that don't fit the remaining budget this run are
+// Rate-limit strategy (Twelve Data free tier: 8 req/min, 800 req/day — see
+// README for how to confirm/adjust these against your own account):
+// every individual HTTP request is spaced apart and counted against the
+// daily budget; items that don't fit the remaining budget this run are
 // skipped (not aborted) so a cheaper item further down the list still gets
 // a chance, and are retried on a later run/day, prioritizing backfills and
 // then the most stale tickers.
 
-import { fetchDaily, fetchMonthly, fetchSplits, sleep } from "./alphavantage";
+import { fetchDaily, fetchSplits, sleep } from "./twelvedata";
 import {
   applySplitAdjustment,
   countRequestsToday,
@@ -47,8 +39,10 @@ import {
 } from "./db";
 import type { Env } from "./types";
 
-const MIN_INTERVAL_MS = 13_000; // > 60s/5 = 12s, small safety margin
+const MIN_INTERVAL_MS = 8_000; // 60s / 8req-per-min = 7.5s, small safety margin
 const SPLITS_REFRESH_DAYS = 30; // splits are rare; no need to re-check daily
+const BACKFILL_OUTPUTSIZE = 5000; // Twelve Data max per request; ~20 years of daily bars
+const INCREMENTAL_OUTPUTSIZE = 100; // last ~100 trading days, cheap daily catch-up
 
 export interface UpdateRunSummary {
   budgetAtStart: number;
@@ -56,13 +50,12 @@ export interface UpdateRunSummary {
   ok: number;
   errors: number;
   rateLimited: boolean;
-  premiumGated: boolean;
-  details: Array<{ ticker: string; requestKind: "monthly" | "compact" | "splits"; status: string; message?: string; rows?: number }>;
+  details: Array<{ ticker: string; requestKind: "daily_full" | "daily_compact" | "splits"; status: string; message?: string; rows?: number }>;
 }
 
 export interface WorkItem {
   ticker: string;
-  needsMonthlyBackfill: boolean;
+  needsFullBackfill: boolean;
   needsSplitsRefresh: boolean;
   cost: number; // number of HTTP requests this item will use
   latestDate: string | null;
@@ -77,7 +70,7 @@ function isOlderThanDays(sqliteTimestamp: string, days: number): boolean {
 
 /**
  * Decides what each active, not-yet-updated-today ticker needs this run
- * (monthly backfill? splits refresh?) and its request cost, sorted with
+ * (full backfill? splits refresh?) and its request cost, sorted with
  * backfills first, then most-stale-first. Pure D1 reads, no network calls —
  * kept separate from the fetch/write loop below so it can be exercised
  * directly against a real local D1 instance without needing to mock fetch().
@@ -88,13 +81,13 @@ export async function buildWorkItems(env: Env): Promise<WorkItem[]> {
   const items: WorkItem[] = [];
   for (const entry of watchlist) {
     if (await hasFetchedOkToday(env, entry.ticker)) continue;
-    const needsMonthlyBackfill = !(await hasEverFetchedOk(env, entry.ticker, "monthly"));
+    const needsFullBackfill = !(await hasEverFetchedOk(env, entry.ticker, "daily_full"));
     const lastSplitsFetch = await getLastSplitsFetchAt(env, entry.ticker);
-    const needsSplitsRefresh = needsMonthlyBackfill || lastSplitsFetch === null || isOlderThanDays(lastSplitsFetch, SPLITS_REFRESH_DAYS);
+    const needsSplitsRefresh = needsFullBackfill || lastSplitsFetch === null || isOlderThanDays(lastSplitsFetch, SPLITS_REFRESH_DAYS);
     const latestDate = await getLatestPriceDate(env, entry.ticker);
     items.push({
       ticker: entry.ticker,
-      needsMonthlyBackfill,
+      needsFullBackfill,
       needsSplitsRefresh,
       cost: 1 + (needsSplitsRefresh ? 1 : 0),
       latestDate,
@@ -104,7 +97,7 @@ export async function buildWorkItems(env: Env): Promise<WorkItem[]> {
   // Backfills first (highest value per request), then most-stale incremental
   // updates first.
   items.sort((a, b) => {
-    if (a.needsMonthlyBackfill !== b.needsMonthlyBackfill) return a.needsMonthlyBackfill ? -1 : 1;
+    if (a.needsFullBackfill !== b.needsFullBackfill) return a.needsFullBackfill ? -1 : 1;
     const ad = a.latestDate ?? "";
     const bd = b.latestDate ?? "";
     if (ad !== bd) return ad < bd ? -1 : 1;
@@ -115,7 +108,7 @@ export async function buildWorkItems(env: Env): Promise<WorkItem[]> {
 }
 
 export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
-  const maxPerDay = Number(env.MAX_REQUESTS_PER_DAY) || 25;
+  const maxPerDay = Number(env.MAX_REQUESTS_PER_DAY) || 800;
   const alreadyUsed = await countRequestsToday(env);
   let budgetRemaining = Math.max(0, maxPerDay - alreadyUsed);
 
@@ -125,7 +118,6 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
     ok: 0,
     errors: 0,
     rateLimited: false,
-    premiumGated: false,
     details: [],
   };
 
@@ -144,26 +136,21 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
     // a cheaper item further down the list might still fit.
     if (budgetRemaining < item.cost) continue;
 
-    const priceRequestKind: "monthly" | "compact" = item.needsMonthlyBackfill ? "monthly" : "compact";
+    const priceRequestKind: "daily_full" | "daily_compact" = item.needsFullBackfill ? "daily_full" : "daily_compact";
 
     await spaceOut();
     summary.attempted++;
-    const priceOutcome = item.needsMonthlyBackfill
-      ? await fetchMonthly(env.ALPHA_VANTAGE_KEY, item.ticker)
-      : await fetchDaily(env.ALPHA_VANTAGE_KEY, item.ticker, "compact");
+    const priceOutcome = await fetchDaily(
+      env.TWELVE_DATA_KEY,
+      item.ticker,
+      item.needsFullBackfill ? BACKFILL_OUTPUTSIZE : INCREMENTAL_OUTPUTSIZE,
+    );
     budgetRemaining--;
 
     if (priceOutcome.kind === "rate_limited") {
       await logFetch(env, { ticker: item.ticker, output_size: priceRequestKind, status: "rate_limited", message: priceOutcome.message });
       summary.rateLimited = true;
       summary.details.push({ ticker: item.ticker, requestKind: priceRequestKind, status: "rate_limited", message: priceOutcome.message });
-      break;
-    }
-    if (priceOutcome.kind === "premium_gated") {
-      await logFetch(env, { ticker: item.ticker, output_size: priceRequestKind, status: "error", message: `PREMIUM_GATED: ${priceOutcome.message}` });
-      summary.errors++;
-      summary.premiumGated = true;
-      summary.details.push({ ticker: item.ticker, requestKind: priceRequestKind, status: "premium_gated", message: priceOutcome.message });
       break;
     }
     if (priceOutcome.kind !== "ok") {
@@ -183,7 +170,7 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
     if (item.needsSplitsRefresh) {
       await spaceOut();
       summary.attempted++;
-      const splitsOutcome = await fetchSplits(env.ALPHA_VANTAGE_KEY, item.ticker);
+      const splitsOutcome = await fetchSplits(env.TWELVE_DATA_KEY, item.ticker);
       budgetRemaining--;
 
       if (splitsOutcome.kind === "ok") {
@@ -194,12 +181,6 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
         await logFetch(env, { ticker: item.ticker, output_size: "splits", status: "rate_limited", message: splitsOutcome.message });
         summary.rateLimited = true;
         summary.details.push({ ticker: item.ticker, requestKind: "splits", status: "rate_limited", message: splitsOutcome.message });
-        stopAfterThisItem = true;
-      } else if (splitsOutcome.kind === "premium_gated") {
-        await logFetch(env, { ticker: item.ticker, output_size: "splits", status: "error", message: `PREMIUM_GATED: ${splitsOutcome.message}` });
-        summary.errors++;
-        summary.premiumGated = true;
-        summary.details.push({ ticker: item.ticker, requestKind: "splits", status: "premium_gated", message: splitsOutcome.message });
         stopAfterThisItem = true;
       } else {
         await logFetch(env, { ticker: item.ticker, output_size: "splits", status: "error", message: splitsOutcome.message });

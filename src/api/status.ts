@@ -9,10 +9,13 @@ export async function handleStatus(env: Env): Promise<Response> {
     countRequestsToday(env),
   ]);
 
-  const maxPerDay = Number(env.MAX_REQUESTS_PER_DAY) || 25;
-  const premiumGatedRecently = (recentLog as Array<Record<string, unknown>>).some(
-    (r) => typeof r.message === "string" && r.message.includes("PREMIUM_GATED"),
-  );
+  const maxPerDay = Number(env.MAX_REQUESTS_PER_DAY) || 800;
+  const log = recentLog as Array<Record<string, unknown>>;
+  const mostRecent = log[0];
+  const recentProblem =
+    mostRecent && (mostRecent.status === "rate_limited" || mostRecent.status === "error")
+      ? { status: mostRecent.status, ticker: mostRecent.ticker, message: mostRecent.message, fetched_at: mostRecent.fetched_at }
+      : null;
 
   return json({
     watchlist_count: watchlist.length,
@@ -21,10 +24,8 @@ export async function handleStatus(env: Env): Promise<Response> {
     requests_budget_per_day: maxPerDay,
     requests_remaining_today: Math.max(0, maxPerDay - usedToday),
     data_mode:
-      "split_adjusted_only: Kurse via TIME_SERIES_DAILY (unadjusted) + SPLITS, adjusted_close selbst rueckwirkend berechnet. NICHT dividenden-bereinigt (TIME_SERIES_DAILY_ADJUSTED ist fuer diesen Key premium-gated, siehe README).",
-    premium_gated_warning: premiumGatedRecently
-      ? "Alpha Vantage hat kuerzlich einen 'premium endpoint'-Hinweis zurueckgegeben (siehe recent_fetch_log). Betroffenen Request pruefen."
-      : null,
+      "split_adjusted_only: Kurse von Twelve Data (unadjusted TIME_SERIES daily) + SPLITS, adjusted_close selbst rueckwirkend berechnet. NICHT dividenden-bereinigt.",
+    recent_problem: recentProblem,
     recent_fetch_log: recentLog,
   });
 }

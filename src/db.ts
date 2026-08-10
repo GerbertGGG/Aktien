@@ -165,7 +165,7 @@ export async function logFetch(
   env: Env,
   entry: {
     ticker: string;
-    output_size: "full" | "compact" | "monthly" | "splits";
+    output_size: "daily_full" | "daily_compact" | "splits";
     status: "ok" | "error" | "rate_limited" | "skipped_budget";
     message?: string;
     rows_upserted?: number;
@@ -185,7 +185,7 @@ export async function logFetch(
     .run();
 }
 
-/** Count of successful Alpha Vantage requests already made today (UTC), used for the 25/day budget. */
+/** Count of successful/errored provider requests already made today (UTC), used for the daily request budget. */
 export async function countRequestsToday(env: Env): Promise<number> {
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM fetch_log

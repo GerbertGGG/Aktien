@@ -5,8 +5,8 @@ export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
 
-  // Secret — set via `wrangler secret put ALPHA_VANTAGE_KEY`, never in code.
-  ALPHA_VANTAGE_KEY: string;
+  // Secret — set via `wrangler secret put TWELVE_DATA_KEY`, never in code.
+  TWELVE_DATA_KEY: string;
 
   // Optional secret — set via `wrangler secret put ADMIN_TOKEN` to require
   // an `x-admin-token` header on /api/admin/* routes. If unset, those routes
