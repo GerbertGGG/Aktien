@@ -77,6 +77,39 @@ async function loadScreener() {
 }
 
 // ---------------------------------------------------------------------
+// Auffaellige Kursbewegungen
+// ---------------------------------------------------------------------
+
+async function loadUnusualMoves() {
+  const body = $("unusual-moves-body");
+  try {
+    const data = await fetchJSON("/api/unusual-moves");
+    $("unusual-moves-hint").textContent = `${data.disclaimer} Stand: ${data.as_of_date ?? "–"}.`;
+
+    if (!data.notable || data.notable.length === 0) {
+      body.innerHTML = '<p class="hint">Keine auffaelligen Bewegungen heute.</p>';
+      return;
+    }
+
+    body.innerHTML =
+      '<div class="unusual-move-list">' +
+      data.notable
+        .map(
+          (m) =>
+            `<div class="unusual-move-item">
+              <span class="ticker">${m.ticker}</span>
+              <span class="${pctClass(m.daily_return)}">${pct(m.daily_return)}</span>
+              <span class="label">${m.label}</span>
+            </div>`,
+        )
+        .join("") +
+      "</div>";
+  } catch (err) {
+    body.innerHTML = `<p class="neg">Fehler: ${String(err.message || err)}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------
 // Backtest
 // ---------------------------------------------------------------------
 
@@ -286,5 +319,6 @@ $("run-update-btn").addEventListener("click", runUpdateNow);
 $("recompute-btn").addEventListener("click", recomputeAdjustmentsNow);
 
 loadScreener();
+loadUnusualMoves();
 loadBacktest();
 loadStatus();

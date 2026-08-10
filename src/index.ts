@@ -7,6 +7,7 @@ import { handleResetAdjustedClose, handleRunUpdate, handleTestFetch, isAuthorize
 import { handleBacktestLatest, handleBacktestRun } from "./api/backtest";
 import { handleScreener } from "./api/screener";
 import { handleStatus } from "./api/status";
+import { handleUnusualMoves } from "./api/unusualMoves";
 import { handleWatchlist } from "./api/watchlist";
 import { runDailyUpdate } from "./cron";
 import { jsonError } from "./http";
@@ -26,6 +27,9 @@ export default {
       }
       if (pathname === "/api/status" && request.method === "GET") {
         return await handleStatus(env);
+      }
+      if (pathname === "/api/unusual-moves" && request.method === "GET") {
+        return await handleUnusualMoves(env);
       }
       if (pathname === "/api/backtest/latest" && request.method === "GET") {
         return await handleBacktestLatest(env);

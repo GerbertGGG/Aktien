@@ -11,6 +11,7 @@ import type {
   SplitRow,
   WatchlistEntry,
 } from "./types";
+import type { DailyBar } from "./unusualMoves";
 
 /**
  * Atomically acquires the single-row run_lock so two overlapping calls to
@@ -71,6 +72,16 @@ export async function getPriceSeries(env: Env, ticker: string): Promise<PricePoi
   )
     .bind(ticker)
     .all<PricePoint>();
+  return results ?? [];
+}
+
+/** Adjusted-close + volume series for a ticker, ascending by date — input to computeUnusualMove. */
+export async function getPriceSeriesWithVolume(env: Env, ticker: string): Promise<DailyBar[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT date, adjusted_close, volume FROM prices WHERE ticker = ? AND adjusted_close IS NOT NULL ORDER BY date ASC",
+  )
+    .bind(ticker)
+    .all<DailyBar>();
   return results ?? [];
 }
 

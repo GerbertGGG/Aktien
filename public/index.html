@@ -43,6 +43,12 @@
     </table>
   </section>
 
+  <section id="unusual-moves-section">
+    <h2>Auffaellige Kursbewegungen</h2>
+    <p class="hint" id="unusual-moves-hint">Rein statistische Auffaelligkeit aus Kurs-/Volumendaten (Z-Score der Tagesbewegung ggue. der eigenen Historie des Tickers, Volumen-Verhaeltnis) &mdash; keine Nachrichten- oder Fundamentaldaten, keine Aussage ueber Ursache oder weitere Entwicklung, kein Kauf-/Verkaufssignal.</p>
+    <div id="unusual-moves-body">Lade...</div>
+  </section>
+
   <section id="backtest-section">
     <h2>Backtest: Strategie vs. Benchmark (SPY)</h2>
     <p class="hint">Monatliches Rebalancing, Transaktionskosten und Out-of-Sample-Split sind fest in der Engine hinterlegt (siehe README) &mdash; keine nachtraegliche Parameteroptimierung.</p>
@@ -96,7 +102,7 @@
   </section>
 
   <footer>
-    Datenquelle: Twelve Data (TIME_SERIES daily + SPLITS, Free Tier, lokal split-bereinigt). Kein automatisierter Handel, keine Order-Ausfuehrung.
+    Datenquelle: Twelve Data (time_series, Free Tier, bereits split-bereinigt). Kein automatisierter Handel, keine Order-Ausfuehrung.
   </footer>
 </div>
 

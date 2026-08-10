@@ -29,6 +29,7 @@ src/
   priceIndex.ts      Binaersuche "Kurs am/vor Datum X" pro Ticker
   momentum.ts        12-1-Momentum-Formel (pure function)
   splitAdjustment.ts Split-Bereinigung aus rohen Kursen + Split-Historie (pure function, NICHT im Standard-Pfad genutzt, siehe "Datenquelle")
+  unusualMoves.ts    Statistische Kurs-/Volumen-Auffaelligkeiten (pure function, siehe "Auffaellige Kursbewegungen")
   screener.ts        Live-Ranking der Watchlist
   stats.ts           CAGR / Sharpe / Max Drawdown / Volatilitaet (pure functions)
   backtest.ts        Backtest-Engine (Rebalancing, Kosten, Out-of-Sample-Split)
@@ -300,11 +301,40 @@ Netzwerk-Calls, direkt testbar gegen eine lokale D1-Instanz):
   Rate-Limit). Ein haengengebliebener Lock (z.B. nach einem Absturz) gilt
   nach 10 Minuten automatisch wieder als frei.
 
+## Auffaellige Kursbewegungen
+
+`/api/unusual-moves` (Dashboard-Sektion "Auffaellige Kursbewegungen") markiert
+Ticker mit einer statistisch ungewoehnlichen Tagesbewegung oder einem
+ungewoehnlichen Handelsvolumen — **rein aus den Kurs-/Volumendaten, die
+ohnehin schon gespeichert sind**, keine neue Datenquelle, kein zusaetzliches
+Budget (`src/unusualMoves.ts`, pure function, siehe
+`test/unusualMoves.smoke.test.ts`).
+
+- **Kursbewegung:** Z-Score des heutigen Tagesreturns gegenueber der
+  Verteilung der letzten 60 Handelstage **desselben Tickers** (nicht ein
+  fixer Prozentwert) — eine 4 %-Bewegung ist fuer TSLA normal und fuer KO
+  ungewoehnlich; der Z-Score beruecksichtigt das automatisch. Default-Schwelle:
+  |Z| >= 2,5.
+- **Volumen:** heutiges Volumen im Verhaeltnis zum Durchschnitt der letzten
+  20 Handelstage. Default-Schwelle: 2,5x.
+- Ausgabe ist bewusst **rein deskriptiv** ("X Standardabweichungen",
+  "Y-faches Durchschnittsvolumen") — **keine** Interpretation von Ursache
+  oder wahrscheinlicher weiterer Entwicklung, keine Kauf-/Verkaufs-Sprache.
+  Das war explizit die Abgrenzung bei diesem Feature: "echte" Nachrichten-
+  oder Fundamentalanalyse (Earnings-Termine, Schlagzeilen) haette eine
+  zusaetzliche, im Free Tier kaum brauchbare kostenpflichtige Datenquelle
+  gebraucht und waere naeher an einem Signal als an einer neutralen
+  Beobachtung — bewusst nicht gebaut.
+- Ticker mit weniger als ~62 Handelstagen Historie werden uebersprungen
+  (`status: "insufficient_history"`), kein falscher Alarm durch zu wenig
+  Daten.
+
 ## API
 
 | Route | Methode | Zweck |
 |---|---|---|
 | `/api/screener` | GET | aktuelles 12-1-Momentum-Ranking |
+| `/api/unusual-moves` | GET | Ticker mit statistisch auffaelliger Tagesbewegung/Volumen (siehe oben) |
 | `/api/watchlist` | GET | Watchlist inkl. Datenstand pro Ticker |
 | `/api/backtest/latest` | GET | letztes gespeichertes Backtest-Ergebnis (alle 3 Splits) |
 | `/api/backtest/run` | POST | Backtest neu berechnen + speichern (Body: `Partial<BacktestParams>`, optional) |
@@ -329,7 +359,7 @@ via `curl http://localhost:8787/api/admin/run-update` (POST) oder
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # Smoke-Tests: Backtest-/Momentum-Mathematik + Split-Bereinigung + Fehlerklassifizierung
+npm test            # Smoke-Tests: Backtest-/Momentum-Mathematik + Split-Bereinigung + Fehlerklassifizierung + Auffaellige-Kursbewegungen
 ```
 
 `npm test` prueft u.a.: korrekte Monats-Arithmetik (inkl. 31-Tage-Monats-
@@ -351,6 +381,12 @@ Standard-Pfad aktuell nicht mehr aufgerufen wird — siehe "Datenquelle".)
 - Keine LLM-generierten "Kauf/Verkauf mit Stop-Loss bei X"-Signale.
 - Keine automatische Survivorship-Bias-Korrektur (fehlende Datengrundlage im
   Free-Tier-Setup) — stattdessen expliziter Hinweis in UI und API.
+- Keine Nachrichten-/Fundamentalanalyse ("Auffaellige Kursbewegungen"
+  beschraenkt sich bewusst auf statistische Kurs-/Volumen-Auffaelligkeiten
+  aus bereits vorhandenen Daten — echte News/Earnings/Fundamentaldaten
+  haetten eine zusaetzliche, im Free Tier kaum brauchbare kostenpflichtige
+  Datenquelle gebraucht und waeren naeher an einem Signal als an einer
+  neutralen Beobachtung).
 
 ## Lizenz / Datenquelle
 
