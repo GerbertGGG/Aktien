@@ -12,6 +12,33 @@ import type {
   WatchlistEntry,
 } from "./types";
 
+/**
+ * Atomically acquires the single-row run_lock so two overlapping calls to
+ * runDailyUpdate() can't both fetch the same tickers at once (observed in
+ * practice: this doubled requests for several tickers and blew through
+ * Twelve Data's per-minute limit). Uses a conditional UPDATE so the
+ * acquire-and-check happens as one atomic D1 statement; `meta.changes > 0`
+ * means we won the lock. A lock older than `staleAfterMinutes` (crashed/
+ * timed-out run) is treated as free.
+ */
+export async function tryAcquireRunLock(env: Env, staleAfterMinutes = 10): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE run_lock SET started_at = datetime('now'), finished_at = NULL
+     WHERE id = 1 AND (
+       finished_at IS NOT NULL
+       OR started_at IS NULL
+       OR started_at < datetime('now', ?)
+     )`,
+  )
+    .bind(`-${staleAfterMinutes} minutes`)
+    .run();
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+export async function releaseRunLock(env: Env): Promise<void> {
+  await env.DB.prepare(`UPDATE run_lock SET finished_at = datetime('now') WHERE id = 1`).run();
+}
+
 export async function getWatchlist(
   env: Env,
   opts: { activeOnly?: boolean } = {},

@@ -38,6 +38,8 @@ import {
   hasEverFetchedOk,
   hasFetchedOkToday,
   logFetch,
+  releaseRunLock,
+  tryAcquireRunLock,
   upsertPrices,
 } from "./db";
 import type { Env } from "./types";
@@ -52,6 +54,8 @@ export interface UpdateRunSummary {
   ok: number;
   errors: number;
   rateLimited: boolean;
+  /** True if this call bailed out immediately because another run was already in progress (see tryAcquireRunLock). */
+  skippedConcurrentRun?: boolean;
   details: Array<{ ticker: string; requestKind: "daily_full" | "daily_compact"; status: string; message?: string; rows?: number }>;
 }
 
@@ -94,65 +98,78 @@ export async function buildWorkItems(env: Env): Promise<WorkItem[]> {
 }
 
 export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
-  const maxPerDay = Number(env.MAX_REQUESTS_PER_DAY) || 800;
-  const alreadyUsed = await countRequestsToday(env);
-  let budgetRemaining = Math.max(0, maxPerDay - alreadyUsed);
-
-  const summary: UpdateRunSummary = {
-    budgetAtStart: budgetRemaining,
+  const emptySummary = (): UpdateRunSummary => ({
+    budgetAtStart: 0,
     attempted: 0,
     ok: 0,
     errors: 0,
     rateLimited: false,
     details: [],
-  };
+  });
 
-  if (budgetRemaining <= 0) return summary;
-
-  const items = await buildWorkItems(env);
-
-  let firstRequest = true;
-  const spaceOut = async () => {
-    if (!firstRequest) await sleep(MIN_INTERVAL_MS);
-    firstRequest = false;
-  };
-
-  for (const item of items) {
-    if (budgetRemaining < item.cost) continue;
-
-    const requestKind: "daily_full" | "daily_compact" = item.needsFullBackfill ? "daily_full" : "daily_compact";
-
-    await spaceOut();
-    summary.attempted++;
-    const outcome = await fetchDaily(
-      env.TWELVE_DATA_KEY,
-      item.ticker,
-      item.needsFullBackfill ? BACKFILL_OUTPUTSIZE : INCREMENTAL_OUTPUTSIZE,
-    );
-    budgetRemaining--;
-
-    if (outcome.kind === "rate_limited") {
-      await logFetch(env, { ticker: item.ticker, output_size: requestKind, status: "rate_limited", message: outcome.message });
-      summary.rateLimited = true;
-      summary.details.push({ ticker: item.ticker, requestKind, status: "rate_limited", message: outcome.message });
-      break;
-    }
-    if (outcome.kind !== "ok") {
-      await logFetch(env, { ticker: item.ticker, output_size: requestKind, status: "error", message: outcome.message });
-      summary.errors++;
-      summary.details.push({ ticker: item.ticker, requestKind, status: outcome.kind, message: outcome.message });
-      continue;
-    }
-
-    const rows = outcome.rows.map((r) => ({ ...r, ticker: item.ticker }));
-    const upserted = await upsertPrices(env, rows);
-    await logFetch(env, { ticker: item.ticker, output_size: requestKind, status: "ok", rows_upserted: upserted });
-    summary.ok++;
-    summary.details.push({ ticker: item.ticker, requestKind, status: "ok", rows: upserted });
-
-    // Recompute adjusted_close from the raw close + the (static) splits table.
-    await applySplitAdjustment(env, item.ticker);
+  // Guards against two overlapping calls (dashboard button + Cron Trigger,
+  // or a double click) double-fetching the same tickers and blowing
+  // through the per-minute rate limit — see migrations/0003_run_lock.sql.
+  if (!(await tryAcquireRunLock(env))) {
+    return { ...emptySummary(), skippedConcurrentRun: true };
   }
 
-  return summary;
+  try {
+    const maxPerDay = Number(env.MAX_REQUESTS_PER_DAY) || 800;
+    const alreadyUsed = await countRequestsToday(env);
+    let budgetRemaining = Math.max(0, maxPerDay - alreadyUsed);
+
+    const summary: UpdateRunSummary = { ...emptySummary(), budgetAtStart: budgetRemaining };
+
+    if (budgetRemaining <= 0) return summary;
+
+    const items = await buildWorkItems(env);
+
+    let firstRequest = true;
+    const spaceOut = async () => {
+      if (!firstRequest) await sleep(MIN_INTERVAL_MS);
+      firstRequest = false;
+    };
+
+    for (const item of items) {
+      if (budgetRemaining < item.cost) continue;
+
+      const requestKind: "daily_full" | "daily_compact" = item.needsFullBackfill ? "daily_full" : "daily_compact";
+
+      await spaceOut();
+      summary.attempted++;
+      const outcome = await fetchDaily(
+        env.TWELVE_DATA_KEY,
+        item.ticker,
+        item.needsFullBackfill ? BACKFILL_OUTPUTSIZE : INCREMENTAL_OUTPUTSIZE,
+      );
+      budgetRemaining--;
+
+      if (outcome.kind === "rate_limited") {
+        await logFetch(env, { ticker: item.ticker, output_size: requestKind, status: "rate_limited", message: outcome.message });
+        summary.rateLimited = true;
+        summary.details.push({ ticker: item.ticker, requestKind, status: "rate_limited", message: outcome.message });
+        break;
+      }
+      if (outcome.kind !== "ok") {
+        await logFetch(env, { ticker: item.ticker, output_size: requestKind, status: "error", message: outcome.message });
+        summary.errors++;
+        summary.details.push({ ticker: item.ticker, requestKind, status: outcome.kind, message: outcome.message });
+        continue;
+      }
+
+      const rows = outcome.rows.map((r) => ({ ...r, ticker: item.ticker }));
+      const upserted = await upsertPrices(env, rows);
+      await logFetch(env, { ticker: item.ticker, output_size: requestKind, status: "ok", rows_upserted: upserted });
+      summary.ok++;
+      summary.details.push({ ticker: item.ticker, requestKind, status: "ok", rows: upserted });
+
+      // Recompute adjusted_close from the raw close + the (static) splits table.
+      await applySplitAdjustment(env, item.ticker);
+    }
+
+    return summary;
+  } finally {
+    await releaseRunLock(env);
+  }
 }

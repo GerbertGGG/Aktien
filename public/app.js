@@ -242,7 +242,11 @@ async function runUpdateNow() {
       method: "POST",
       headers: { ...adminHeaders() },
     });
-    $("update-status").textContent = `Fertig: ${data.ok} ok, ${data.errors} Fehler, ${data.attempted} versucht.`;
+    if (data.skippedConcurrentRun) {
+      $("update-status").textContent = "Es laeuft bereits ein anderes Preis-Update — bitte kurz warten und nicht mehrfach klicken.";
+    } else {
+      $("update-status").textContent = `Fertig: ${data.ok} ok, ${data.errors} Fehler, ${data.attempted} versucht.`;
+    }
     await loadStatus();
     await loadScreener();
   } catch (err) {

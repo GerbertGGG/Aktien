@@ -289,6 +289,16 @@ Netzwerk-Calls, direkt testbar gegen eine lokale D1-Instanz):
   so noch eine Chance. Am naechsten Tag geht es automatisch weiter.
 - Meldet Twelve Data `rate_limited`, bricht der Lauf sofort ab (kein
   sinnloses Weiterprobieren).
+- **Concurrent-Run-Schutz:** `runDailyUpdate()` holt sich zu Beginn einen
+  Lock (`run_lock`-Tabelle, `migrations/0003_run_lock.sql`, atomares
+  `UPDATE ... WHERE`). Laeuft bereits ein anderer Update-Vorgang (z.B.
+  Dashboard-Button geklickt waehrend der Cron-Trigger laeuft, oder
+  Doppelklick), bricht der zweite Aufruf sofort mit
+  `skippedConcurrentRun: true` ab, statt Ticker doppelt abzufragen und das
+  Minutenlimit zu sprengen (genau das ist in der Praxis einmal passiert —
+  9 Ticker wurden doppelt abgerufen und ein zehnter lief prompt ins
+  Rate-Limit). Ein haengengebliebener Lock (z.B. nach einem Absturz) gilt
+  nach 10 Minuten automatisch wieder als frei.
 
 ## API
 
