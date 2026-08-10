@@ -3,28 +3,21 @@
 //    verify the API key + response structure after `wrangler secret put`
 //    (see README "Setup Schritt 2"). Does NOT write to D1. Supports
 //    ?function=daily|splits and ?outputsize=N (daily only). Note: /splits
-//    requires a paid Twelve Data plan (confirmed) — kept here mainly so you
-//    can re-check if you ever upgrade; splits are otherwise maintained
-//    manually, see scripts/seed-splits.sql.
+//    requires a paid Twelve Data plan (confirmed) and isn't used to adjust
+//    prices anyway — Twelve Data's plain `close` is already split-adjusted
+//    (see src/twelvedata.ts, src/cron.ts) — kept only for diagnostics.
 //  - POST /api/admin/run-update : manually trigger the same logic the daily
 //    Cron Trigger runs, useful for local testing without waiting for 22:00 UTC.
-//  - POST /api/admin/splits : add/update one split entry by hand (since
-//    Twelve Data's /splits needs a paid plan) and immediately recompute
-//    adjusted_close for that ticker — the no-D1-console way to record a
-//    newly-announced split. Body: {"ticker":"AAPL","effective_date":"2030-01-01","split_factor":4}
-//  - POST /api/admin/recompute-adjustments : recompute adjusted_close for
-//    EVERY watchlist ticker from stored raw close + whatever's currently in
-//    the splits table. No Twelve Data calls, so it's free and instant.
-//    Needed once after `scripts/seed-splits.sql` was run AFTER some tickers
-//    had already been backfilled — applySplitAdjustment only runs
-//    automatically right after a price fetch, so splits added later don't
-//    retroactively fix tickers that were already fetched.
+//  - POST /api/admin/reset-adjusted-close : repair tool — resets
+//    adjusted_close back to the raw close for every watchlist ticker. No
+//    Twelve Data calls, free and instant. Needed if adjusted_close was ever
+//    double-adjusted (see src/db.ts resetAdjustedCloseToRaw for the story).
 //
-// All four are gated behind ADMIN_TOKEN if that secret is set (see types.ts).
+// All three are gated behind ADMIN_TOKEN if that secret is set (see types.ts).
 
 import { fetchDaily, fetchSplits } from "../twelvedata";
 import { runDailyUpdate } from "../cron";
-import { applySplitAdjustment, getWatchlist, upsertSplit } from "../db";
+import { getWatchlist, resetAdjustedCloseToRaw } from "../db";
 import { json, jsonError } from "../http";
 import type { Env } from "../types";
 
@@ -72,35 +65,12 @@ export async function handleRunUpdate(env: Env): Promise<Response> {
   return json(summary);
 }
 
-export async function handleAddSplit(env: Env, request: Request): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return jsonError("Request-Body ist kein valides JSON.");
-  }
-
-  const { ticker, effective_date, split_factor } = (body ?? {}) as Record<string, unknown>;
-  if (typeof ticker !== "string" || !ticker) return jsonError("'ticker' fehlt oder ist kein String.");
-  if (typeof effective_date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(effective_date)) {
-    return jsonError("'effective_date' fehlt oder ist kein ISO-Datum (yyyy-mm-dd).");
-  }
-  const factor = Number(split_factor);
-  if (!Number.isFinite(factor) || factor <= 0) return jsonError("'split_factor' fehlt oder ist keine positive Zahl.");
-
-  const normalizedTicker = ticker.toUpperCase();
-  await upsertSplit(env, normalizedTicker, effective_date, factor);
-  const rowsRecomputed = await applySplitAdjustment(env, normalizedTicker);
-
-  return json({ ok: true, ticker: normalizedTicker, effective_date, split_factor: factor, rows_recomputed: rowsRecomputed });
-}
-
-export async function handleRecomputeAdjustments(env: Env): Promise<Response> {
+export async function handleResetAdjustedClose(env: Env): Promise<Response> {
   const watchlist = await getWatchlist(env);
-  const results: Array<{ ticker: string; rows_recomputed: number }> = [];
+  const results: Array<{ ticker: string; rows_reset: number }> = [];
   for (const entry of watchlist) {
-    const rows = await applySplitAdjustment(env, entry.ticker);
-    results.push({ ticker: entry.ticker, rows_recomputed: rows });
+    const rows = await resetAdjustedCloseToRaw(env, entry.ticker);
+    results.push({ ticker: entry.ticker, rows_reset: rows });
   }
   return json({ ok: true, tickers_processed: results.length, results });
 }

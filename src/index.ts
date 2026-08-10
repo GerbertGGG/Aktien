@@ -3,7 +3,7 @@
 // automatically by the Assets binding for any path that isn't handled here
 // (see wrangler.toml [assets]).
 
-import { handleAddSplit, handleRecomputeAdjustments, handleRunUpdate, handleTestFetch, isAuthorized } from "./api/admin";
+import { handleResetAdjustedClose, handleRunUpdate, handleTestFetch, isAuthorized } from "./api/admin";
 import { handleBacktestLatest, handleBacktestRun } from "./api/backtest";
 import { handleScreener } from "./api/screener";
 import { handleStatus } from "./api/status";
@@ -42,13 +42,9 @@ export default {
         if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
         return await handleRunUpdate(env);
       }
-      if (pathname === "/api/admin/splits" && request.method === "POST") {
+      if (pathname === "/api/admin/reset-adjusted-close" && request.method === "POST") {
         if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
-        return await handleAddSplit(env, request);
-      }
-      if (pathname === "/api/admin/recompute-adjustments" && request.method === "POST") {
-        if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
-        return await handleRecomputeAdjustments(env);
+        return await handleResetAdjustedClose(env);
       }
 
       if (pathname.startsWith("/api/")) {

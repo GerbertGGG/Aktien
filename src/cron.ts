@@ -6,20 +6,26 @@
 // documents up to 5000 bars per request even on the free plan, so a single
 // request can backfill years of daily history.
 //
-// Split adjustment: Twelve Data's /splits endpoint requires a paid plan
-// (confirmed), so split history comes from a manually curated, static
-// table instead (`scripts/seed-splits.sql`) rather than a live API call —
-// see that file and the README "Datenquelle" section for why. This means
-// the cron job no longer needs a separate splits request at all; every
-// ticker costs exactly 1 request per run.
+// Split adjustment: Twelve Data's plain `close` field is ALREADY
+// split-adjusted (confirmed empirically 2026-08-10: NVDA's stored close for
+// 2024-06-07, the last pre-split trading day, was 120.888 — exactly its
+// real pre-split closing price of $1208.88 divided by the 10:1 split factor
+// that took effect 2024-06-10). Earlier versions of this project applied a
+// SECOND, manual split adjustment on top of that (see git history /
+// scripts/seed-splits.sql), which double-adjusted every pre-split price and
+// produced a wildly wrong backtest (~99% annualized volatility, a fake
+// vertical jump in the equity curve right at each split date). `close` is
+// used as `adjusted_close` directly now — no further adjustment applied.
+// (Twelve Data's docs don't say this explicitly for the free `time_series`
+// endpoint; if you ever see a similar artificial jump again for a ticker
+// with a real split, re-verify with the same before/after-close check
+// before reintroducing any adjustment logic.)
 //
 // Per-ticker strategy:
 //   - One-time (gated by hasEverFetchedOk 'daily_full', not a row-count
 //     heuristic): a single large-outputsize request (years of history).
 //   - Every day after: a small outputsize request (~100 bars) to catch up
 //     and self-correct recent data.
-// After every successful fetch, adjusted_close is recomputed from the raw
-// close plus whatever's currently in the (static) `splits` table.
 //
 // Rate-limit strategy (Twelve Data free tier: 8 req/min, 800 req/day — see
 // README for how to confirm/adjust these against your own account):
@@ -31,7 +37,6 @@
 
 import { fetchDaily, sleep } from "./twelvedata";
 import {
-  applySplitAdjustment,
   countRequestsToday,
   getLatestPriceDate,
   getWatchlist,
@@ -163,9 +168,6 @@ export async function runDailyUpdate(env: Env): Promise<UpdateRunSummary> {
       await logFetch(env, { ticker: item.ticker, output_size: requestKind, status: "ok", rows_upserted: upserted });
       summary.ok++;
       summary.details.push({ ticker: item.ticker, requestKind, status: "ok", rows: upserted });
-
-      // Recompute adjusted_close from the raw close + the (static) splits table.
-      await applySplitAdjustment(env, item.ticker);
     }
 
     return summary;

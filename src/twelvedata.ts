@@ -5,12 +5,12 @@
 // several days in a row, with no way for us to inspect or reset the key's
 // actual server-side quota state.
 //
-// NOT YET LIVE-VERIFIED from the environment this was built in (no network
-// route to api.twelvedata.com from that sandbox) — field names below follow
-// Twelve Data's public documentation as closely as possible, but please run
-// the verification step in README "Setup Schritt 2" once you have a key
-// (GET /api/admin/test-fetch?provider=twelvedata&function=daily) and share
-// the raw response if anything looks off; the parsing here is easy to patch.
+// Live-verified 2026-08-10: `time_series`'s plain `close` field is ALREADY
+// split-adjusted (NVDA's stored close for 2024-06-07, its last pre-split
+// trading day, was 120.888 — exactly the real pre-split close of $1208.88
+// divided by the 10:1 split that took effect 2024-06-10). Do not apply any
+// further split adjustment on top of this — see src/cron.ts for the story
+// of the bug that caused.
 
 import type { PriceRow } from "./types";
 
@@ -137,7 +137,7 @@ export async function fetchDaily(apiKey: string, ticker: string, outputsize: num
       high: num(v.high),
       low: num(v.low),
       close,
-      adjusted_close: close, // placeholder; overwritten by db.applySplitAdjustment
+      adjusted_close: close, // Twelve Data's close is already split-adjusted, see header comment
       volume: v.volume ? Math.trunc(Number(v.volume)) : null,
       dividend_amount: null,
       split_coefficient: null,
@@ -147,7 +147,12 @@ export async function fetchDaily(apiKey: string, ticker: string, outputsize: num
   return { kind: "ok", rows };
 }
 
-/** Official split history, used to back-adjust the unadjusted daily closes (src/splitAdjustment.ts). */
+/**
+ * Official split history. Requires a paid Twelve Data plan (confirmed) —
+ * kept for diagnostics/`test-fetch` only. NOT used to adjust prices: the
+ * plain `close` from fetchDaily() is already split-adjusted (see header
+ * comment), so applying this on top would double-adjust.
+ */
 export async function fetchSplits(apiKey: string, ticker: string): Promise<SplitsOutcome> {
   const result = await fetchJson<RawSplitsResponse>("/splits", { symbol: ticker, apikey: apiKey });
   if (!result.ok) return { kind: "error", message: result.message };

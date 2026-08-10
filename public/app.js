@@ -259,13 +259,13 @@ async function runUpdateNow() {
 async function recomputeAdjustmentsNow() {
   const btn = $("recompute-btn");
   btn.disabled = true;
-  $("update-status").textContent = "Split-Bereinigung wird neu berechnet...";
+  $("update-status").textContent = "Adjusted-Close wird zurueckgesetzt...";
   try {
-    const data = await fetchJSON("/api/admin/recompute-adjustments", {
+    const data = await fetchJSON("/api/admin/reset-adjusted-close", {
       method: "POST",
       headers: { ...adminHeaders() },
     });
-    $("update-status").textContent = `Fertig: ${data.tickers_processed} Ticker neu berechnet.`;
+    $("update-status").textContent = `Fertig: ${data.tickers_processed} Ticker zurueckgesetzt.`;
     await loadScreener();
   } catch (err) {
     $("update-status").textContent = `Fehler: ${String(err.message || err)}`;

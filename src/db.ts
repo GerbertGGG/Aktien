@@ -142,23 +142,7 @@ export async function getRawPriceSeries(env: Env, ticker: string): Promise<Array
   return results ?? [];
 }
 
-/**
- * Adds or updates one split entry (see scripts/seed-splits.sql — split
- * history is manually curated, not fetched from an API; this is how you
- * record a newly-announced split without touching the D1 console). Caller
- * is responsible for calling applySplitAdjustment() afterwards to
- * recompute adjusted_close.
- */
-export async function upsertSplit(env: Env, ticker: string, effectiveDate: string, splitFactor: number): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO splits (ticker, effective_date, split_factor) VALUES (?, ?, ?)
-     ON CONFLICT (ticker, effective_date) DO UPDATE SET split_factor = excluded.split_factor`,
-  )
-    .bind(ticker, effectiveDate, splitFactor)
-    .run();
-}
-
-/** Stored split history for a ticker, ascending by effective_date. */
+/** Stored split history for a ticker, ascending by effective_date. NOT used by default — see applySplitAdjustment. */
 export async function getSplits(env: Env, ticker: string): Promise<SplitRow[]> {
   const { results } = await env.DB.prepare(
     "SELECT ticker, effective_date, split_factor FROM splits WHERE ticker = ? ORDER BY effective_date ASC",
@@ -170,11 +154,13 @@ export async function getSplits(env: Env, ticker: string): Promise<SplitRow[]> {
 
 /**
  * Recomputes `adjusted_close` for every stored price row of `ticker` from
- * the raw `close` column and the ticker's known split history: every price
- * dated before a split gets divided by that split's factor (and by every
- * later split's factor too, cumulatively) so historical prices are
- * comparable to today's post-split scale. This is SPLIT-adjustment only —
- * no dividend reinvestment is modeled (see README).
+ * the raw `close` column and the ticker's known split history (kept for
+ * reference/future use — NOT called anywhere by default). Twelve Data's
+ * `close` is already split-adjusted (see src/twelvedata.ts, src/cron.ts);
+ * calling this on top of that would double-adjust every pre-split price.
+ * Only reach for this again if a future data source genuinely returns
+ * unadjusted closes, after verifying that with a real before/after-split
+ * price check like the one documented in src/cron.ts.
  */
 export async function applySplitAdjustment(env: Env, ticker: string): Promise<number> {
   const [splits, prices] = await Promise.all([getSplits(env, ticker), getRawPriceSeries(env, ticker)]);
@@ -192,6 +178,18 @@ export async function applySplitAdjustment(env: Env, ticker: string): Promise<nu
     await env.DB.batch(updates.slice(i, i + CHUNK));
   }
   return updates.length;
+}
+
+/**
+ * Repair tool: resets `adjusted_close` back to the raw `close` value for
+ * every stored row of `ticker`. Twelve Data's `close` is already
+ * split-adjusted, so this IS the correct value — use this to undo any
+ * accidental double-adjustment (e.g. from an old deploy that still called
+ * applySplitAdjustment). Returns the number of rows updated.
+ */
+export async function resetAdjustedCloseToRaw(env: Env, ticker: string): Promise<number> {
+  const result = await env.DB.prepare("UPDATE prices SET adjusted_close = close WHERE ticker = ?").bind(ticker).run();
+  return result.meta?.changes ?? 0;
 }
 
 export async function logFetch(

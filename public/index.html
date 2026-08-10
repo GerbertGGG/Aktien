@@ -85,10 +85,10 @@
     <p class="status-line" id="status-summary">Lade...</p>
     <div class="actions">
       <button class="primary" id="run-update-btn">Preis-Update jetzt ausloesen</button>
-      <button class="primary" id="recompute-btn">Split-Bereinigung neu berechnen</button>
+      <button class="primary" id="recompute-btn">Adjusted-Close-Korrektur zuruecksetzen</button>
       <span class="status-line" id="update-status"></span>
     </div>
-    <p class="hint">"Split-Bereinigung neu berechnen" braucht keine neuen Kursdaten (kein Twelve-Data-Request) — nuetzlich nach dem Einspielen von <code>scripts/seed-splits.sql</code> oder <code>/api/admin/splits</code>, falls Ticker schon vorher befuellt wurden.</p>
+    <p class="hint">Twelve Data liefert bereits split-bereinigte Kurse. "Adjusted-Close-Korrektur zuruecksetzen" braucht keine neuen Kursdaten (kein Twelve-Data-Request) — nur noetig als Reparatur, falls jemals eine zusaetzliche (falsche) Bereinigung angewendet wurde.</p>
     <details>
       <summary>Letzte Fetch-Log-Eintraege</summary>
       <pre class="log" id="fetch-log">&nbsp;</pre>

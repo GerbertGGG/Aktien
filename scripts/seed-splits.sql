@@ -1,3 +1,13 @@
+-- NICHT MEHR VERWENDET (seit 2026-08-10) — nicht mehr Teil von `npm run
+-- db:seed:*`. Live verifiziert: Twelve Data's `time_series` liefert die
+-- Kurse bereits split-bereinigt (NVDAs gespeicherter close am 2024-06-07,
+-- dem letzten Handelstag vor dem 10:1-Split, war 120.888 — exakt der echte
+-- Schlusskurs von $1208.88 geteilt durch 10). Diese Tabelle hier auf
+-- adjusted_close anzuwenden wuerde also DOPPELT bereinigen (siehe
+-- src/cron.ts, src/db.ts resetAdjustedCloseToRaw fuer die Story). Datei
+-- bleibt nur als Referenz/fuer den Fall stehen, dass ein kuenftiger
+-- Datenanbieter tatsaechlich unadjusted Kurse liefert.
+--
 -- Manuell kuratierte Split-Historie fuer die Watchlist-Ticker.
 --
 -- Hintergrund: sowohl Alpha Vantage (SPLITS) als auch Twelve Data (/splits)

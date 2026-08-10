@@ -12,8 +12,8 @@
     "db:create": "wrangler d1 create momentum-screener-db",
     "db:migrate:local": "wrangler d1 migrations apply momentum-screener-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply momentum-screener-db --remote",
-    "db:seed:local": "wrangler d1 execute momentum-screener-db --local --file=./scripts/seed-watchlist.sql && wrangler d1 execute momentum-screener-db --local --file=./scripts/seed-splits.sql",
-    "db:seed:remote": "wrangler d1 execute momentum-screener-db --remote --file=./scripts/seed-watchlist.sql && wrangler d1 execute momentum-screener-db --remote --file=./scripts/seed-splits.sql",
+    "db:seed:local": "wrangler d1 execute momentum-screener-db --local --file=./scripts/seed-watchlist.sql",
+    "db:seed:remote": "wrangler d1 execute momentum-screener-db --remote --file=./scripts/seed-watchlist.sql",
     "tail": "wrangler tail"
   },
   "devDependencies": {
