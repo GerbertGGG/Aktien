@@ -115,14 +115,20 @@ export async function getRawPriceSeries(env: Env, ticker: string): Promise<Array
   return results ?? [];
 }
 
-/** Replaces the stored split history for one ticker with the freshly fetched list (authoritative source wins). */
-export async function replaceSplits(env: Env, ticker: string, splits: Array<{ effective_date: string; split_factor: number }>): Promise<void> {
-  await env.DB.prepare("DELETE FROM splits WHERE ticker = ?").bind(ticker).run();
-  if (splits.length === 0) return;
-  const stmt = env.DB.prepare(
-    "INSERT INTO splits (ticker, effective_date, split_factor) VALUES (?, ?, ?)",
-  );
-  await env.DB.batch(splits.map((s) => stmt.bind(ticker, s.effective_date, s.split_factor)));
+/**
+ * Adds or updates one split entry (see scripts/seed-splits.sql — split
+ * history is manually curated, not fetched from an API; this is how you
+ * record a newly-announced split without touching the D1 console). Caller
+ * is responsible for calling applySplitAdjustment() afterwards to
+ * recompute adjusted_close.
+ */
+export async function upsertSplit(env: Env, ticker: string, effectiveDate: string, splitFactor: number): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO splits (ticker, effective_date, split_factor) VALUES (?, ?, ?)
+     ON CONFLICT (ticker, effective_date) DO UPDATE SET split_factor = excluded.split_factor`,
+  )
+    .bind(ticker, effectiveDate, splitFactor)
+    .run();
 }
 
 /** Stored split history for a ticker, ascending by effective_date. */
@@ -165,7 +171,7 @@ export async function logFetch(
   env: Env,
   entry: {
     ticker: string;
-    output_size: "daily_full" | "daily_compact" | "splits";
+    output_size: "daily_full" | "daily_compact";
     status: "ok" | "error" | "rate_limited" | "skipped_budget";
     message?: string;
     rows_upserted?: number;
@@ -195,19 +201,7 @@ export async function countRequestsToday(env: Env): Promise<number> {
   return row?.n ?? 0;
 }
 
-/** Most recent successful SPLITS fetch for a ticker (used to throttle how often we re-check split history). */
-export async function getLastSplitsFetchAt(env: Env, ticker: string): Promise<string | null> {
-  const row = await env.DB.prepare(
-    `SELECT fetched_at FROM fetch_log
-     WHERE ticker = ? AND output_size = 'splits' AND status = 'ok'
-     ORDER BY fetched_at DESC LIMIT 1`,
-  )
-    .bind(ticker)
-    .first<{ fetched_at: string }>();
-  return row?.fetched_at ?? null;
-}
-
-/** Whether a given output_size (e.g. 'monthly') has ever succeeded for a ticker — used to gate one-time backfills. */
+/** Whether a given output_size (e.g. 'daily_full') has ever succeeded for a ticker — used to gate one-time backfills. */
 export async function hasEverFetchedOk(env: Env, ticker: string, outputSize: string): Promise<boolean> {
   const row = await env.DB.prepare(
     `SELECT 1 AS present FROM fetch_log
