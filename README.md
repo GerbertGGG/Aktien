@@ -176,6 +176,17 @@ mit aktualisiert, aber nicht im Screener-Ranking gefuehrt.
 > ausfuehren (idempotent dank `INSERT OR IGNORE`), oder direkt per SQL in
 > `watchlist` pflegen.
 
+> **Falls ihr Preis-Updates schon VOR diesem Schritt ausgeloest habt**
+> (z.B. beim Debuggen): `adjusted_close` wird nur direkt nach einem
+> Kurs-Fetch neu berechnet, nicht rueckwirkend, wenn Splits erst spaeter
+> eingespielt werden. Symptom im Backtest: unrealistisch hohe Volatilitaet/
+> CAGR und ein ploetzlicher Sprung in der Equity-Kurve (typischerweise genau
+> am Datum eines nicht bereinigten Splits, z.B. NVDA/AVGO/WMT 2024). Fix:
+> einmal `POST /api/admin/recompute-adjustments` aufrufen (Button "Split-
+> Bereinigung neu berechnen" im Dashboard) — kostet keinen Twelve-Data-
+> Request, rechnet nur aus bereits gespeicherten Rohdaten + der Split-
+> Tabelle neu.
+
 ### 4. Deploy
 
 ```bash
@@ -311,7 +322,8 @@ Netzwerk-Calls, direkt testbar gegen eine lokale D1-Instanz):
 | `/api/status` | GET | Rate-Limit-Budget, Fetch-Log, Watchlist-Zaehler, letztes Problem |
 | `/api/admin/test-fetch` | GET | roher Twelve-Data-Testaufruf, `?function=daily\|splits` (schreibt nichts in D1; `splits` braucht einen bezahlten Plan) |
 | `/api/admin/run-update` | POST | Preis-Update manuell ausloesen (= Cron-Logik) |
-| `/api/admin/splits` | POST | Split manuell eintragen + `adjusted_close` sofort neu berechnen (Body: `{ticker, effective_date, split_factor}`) |
+| `/api/admin/splits` | POST | Split manuell eintragen + `adjusted_close` fuer diesen Ticker sofort neu berechnen (Body: `{ticker, effective_date, split_factor}`) |
+| `/api/admin/recompute-adjustments` | POST | `adjusted_close` fuer **alle** Watchlist-Ticker neu berechnen, ohne neue Kursdaten zu holen (kein Twelve-Data-Request) — auch als Button "Split-Bereinigung neu berechnen" im Dashboard. Wichtig, falls Ticker schon befuellt wurden, **bevor** `scripts/seed-splits.sql` eingespielt wurde: die Bereinigung wird sonst nicht rueckwirkend angewendet. |
 
 ## Lokale Entwicklung
 

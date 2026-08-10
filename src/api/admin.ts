@@ -12,12 +12,19 @@
 //    Twelve Data's /splits needs a paid plan) and immediately recompute
 //    adjusted_close for that ticker — the no-D1-console way to record a
 //    newly-announced split. Body: {"ticker":"AAPL","effective_date":"2030-01-01","split_factor":4}
+//  - POST /api/admin/recompute-adjustments : recompute adjusted_close for
+//    EVERY watchlist ticker from stored raw close + whatever's currently in
+//    the splits table. No Twelve Data calls, so it's free and instant.
+//    Needed once after `scripts/seed-splits.sql` was run AFTER some tickers
+//    had already been backfilled — applySplitAdjustment only runs
+//    automatically right after a price fetch, so splits added later don't
+//    retroactively fix tickers that were already fetched.
 //
-// All three are gated behind ADMIN_TOKEN if that secret is set (see types.ts).
+// All four are gated behind ADMIN_TOKEN if that secret is set (see types.ts).
 
 import { fetchDaily, fetchSplits } from "../twelvedata";
 import { runDailyUpdate } from "../cron";
-import { applySplitAdjustment, upsertSplit } from "../db";
+import { applySplitAdjustment, getWatchlist, upsertSplit } from "../db";
 import { json, jsonError } from "../http";
 import type { Env } from "../types";
 
@@ -86,4 +93,14 @@ export async function handleAddSplit(env: Env, request: Request): Promise<Respon
   const rowsRecomputed = await applySplitAdjustment(env, normalizedTicker);
 
   return json({ ok: true, ticker: normalizedTicker, effective_date, split_factor: factor, rows_recomputed: rowsRecomputed });
+}
+
+export async function handleRecomputeAdjustments(env: Env): Promise<Response> {
+  const watchlist = await getWatchlist(env);
+  const results: Array<{ ticker: string; rows_recomputed: number }> = [];
+  for (const entry of watchlist) {
+    const rows = await applySplitAdjustment(env, entry.ticker);
+    results.push({ ticker: entry.ticker, rows_recomputed: rows });
+  }
+  return json({ ok: true, tickers_processed: results.length, results });
 }

@@ -256,6 +256,24 @@ async function runUpdateNow() {
   }
 }
 
+async function recomputeAdjustmentsNow() {
+  const btn = $("recompute-btn");
+  btn.disabled = true;
+  $("update-status").textContent = "Split-Bereinigung wird neu berechnet...";
+  try {
+    const data = await fetchJSON("/api/admin/recompute-adjustments", {
+      method: "POST",
+      headers: { ...adminHeaders() },
+    });
+    $("update-status").textContent = `Fertig: ${data.tickers_processed} Ticker neu berechnet.`;
+    await loadScreener();
+  } catch (err) {
+    $("update-status").textContent = `Fehler: ${String(err.message || err)}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------
@@ -265,6 +283,7 @@ document.querySelectorAll(".tab-btn").forEach((btn) => {
 });
 $("run-backtest-btn").addEventListener("click", runBacktestNow);
 $("run-update-btn").addEventListener("click", runUpdateNow);
+$("recompute-btn").addEventListener("click", recomputeAdjustmentsNow);
 
 loadScreener();
 loadBacktest();
