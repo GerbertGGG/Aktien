@@ -7,6 +7,7 @@ import { handleResetAdjustedClose, handleRunUpdate, handleTestFetch, isAuthorize
 import { handleBacktestLatest, handleBacktestRun } from "./api/backtest";
 import { handleScreener } from "./api/screener";
 import { handleStatus } from "./api/status";
+import { handleTimetreeExport, handleTimetreeLogin } from "./api/timetree";
 import { handleUnusualMoves } from "./api/unusualMoves";
 import { handleWatchlist } from "./api/watchlist";
 import { runDailyUpdate } from "./cron";
@@ -50,9 +51,23 @@ export default {
         if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
         return await handleResetAdjustedClose(env);
       }
+      if (pathname === "/api/timetree/login" && request.method === "POST") {
+        if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
+        return await handleTimetreeLogin(request);
+      }
+      if (pathname === "/api/timetree/export" && request.method === "POST") {
+        if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
+        return await handleTimetreeExport(request);
+      }
 
       if (pathname.startsWith("/api/")) {
         return jsonError("Not found", 404);
+      }
+
+      // Standalone TimeTree exporter page — not part of the SPA, served
+      // explicitly so /timetree doesn't fall through to index.html.
+      if (pathname === "/timetree" && request.method === "GET") {
+        return await env.ASSETS.fetch(new Request(new URL("/timetree.html", url), request));
       }
 
       // Everything else: static dashboard (public/), including SPA fallback.
