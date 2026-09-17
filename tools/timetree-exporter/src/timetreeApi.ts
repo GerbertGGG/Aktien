@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { API_BASE_URI, ATTACHMENTS_BASE_URI } from './const.js';
+import { API_BASE_URI, API_USER_AGENT, ATTACHMENTS_BASE_URI } from './const.js';
 import type { CalendarLabel, RawEvent } from './event.js';
 
 export type LabelMap = Map<number, CalendarLabel>;
@@ -67,6 +67,7 @@ export class TimeTreeApi {
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return {
       'Content-Type': 'application/json',
+      'X-Timetreea': API_USER_AGENT,
       Cookie: `_session_id=${this.sessionId}`,
       ...extra,
     };

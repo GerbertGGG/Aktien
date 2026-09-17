@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { API_BASE_URI } from './const.js';
+import { API_BASE_URI, API_USER_AGENT } from './const.js';
 
 export class AuthenticationError extends Error {}
 export class InvalidCredentialsError extends AuthenticationError {}
 export class RateLimitAuthenticationError extends AuthenticationError {}
+
+const SIGNIN_PAGE_URL = 'https://timetreeapp.com/signin';
 
 function extractErrorCode(body: unknown): number | undefined {
   if (body && typeof body === 'object' && 'error' in body) {
@@ -16,12 +18,47 @@ function extractErrorCode(body: unknown): number | undefined {
   return undefined;
 }
 
+function getSetCookieHeaders(response: Response): string[] {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  if (typeof headers.getSetCookie === 'function') return headers.getSetCookie();
+  const raw = response.headers.get('set-cookie');
+  return raw ? [raw] : [];
+}
+
 function parseSessionId(setCookieHeaders: string[]): string | undefined {
   for (const header of setCookieHeaders) {
     const match = /(?:^|;\s*)_session_id=([^;]+)/.exec(header);
     if (match) return decodeURIComponent(match[1]!);
   }
   return undefined;
+}
+
+function cookiePairsFrom(setCookieHeaders: string[]): string {
+  return setCookieHeaders
+    .map((header) => header.split(';', 1)[0]!.trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
+/**
+ * TimeTree's web app serves a CSRF token via a <meta name="csrf-token">
+ * tag on its own sign-in page, and the login PUT below requires it (as
+ * X-Csrf-Token) plus the cookies issued alongside it - without both, the
+ * API rejects the request outright with a generic, undocumented error
+ * regardless of whether the credentials are correct.
+ */
+async function fetchCsrfContext(): Promise<{ token: string; cookies: string }> {
+  const response = await fetch(SIGNIN_PAGE_URL);
+  const html = await response.text();
+  const match =
+    /<meta[^>]*name=["']csrf-token["'][^>]*content=["']([^"']+)["']/i.exec(html) ??
+    /<meta[^>]*content=["']([^"']+)["'][^>]*name=["']csrf-token["']/i.exec(html);
+  if (!match) {
+    throw new AuthenticationError(
+      "Could not find a CSRF token on TimeTree's sign-in page (its markup may have changed)",
+    );
+  }
+  return { token: match[1]!, cookies: cookiePairsFrom(getSetCookieHeaders(response)) };
 }
 
 /**
@@ -31,10 +68,15 @@ function parseSessionId(setCookieHeaders: string[]): string | undefined {
  * by TimeTree, can break at any time).
  */
 export async function login(email: string, password: string): Promise<string> {
+  const { token, cookies } = await fetchCsrfContext();
+
   const response = await fetch(`${API_BASE_URI}/auth/email/signin`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
+      'X-Timetreea': API_USER_AGENT,
+      'X-Csrf-Token': token,
+      ...(cookies ? { Cookie: cookies } : {}),
     },
     body: JSON.stringify({
       uid: email,
@@ -62,15 +104,7 @@ export async function login(email: string, password: string): Promise<string> {
     );
   }
 
-  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
-  const setCookie = typeof headers.getSetCookie === 'function'
-    ? headers.getSetCookie()
-    : (() => {
-        const raw = response.headers.get('set-cookie');
-        return raw ? [raw] : [];
-      })();
-
-  const sessionId = parseSessionId(setCookie);
+  const sessionId = parseSessionId(getSetCookieHeaders(response));
   if (!sessionId) {
     throw new AuthenticationError('Login succeeded but no session cookie was returned');
   }
