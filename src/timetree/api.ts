@@ -1,4 +1,4 @@
-import { API_BASE_URI } from "./const";
+import { API_BASE_URI, API_USER_AGENT } from "./const";
 import type { CalendarLabel, RawEvent } from "./event";
 
 export type LabelMap = Map<number, CalendarLabel>;
@@ -65,6 +65,7 @@ export class TimeTreeApi {
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return {
       "Content-Type": "application/json",
+      "X-Timetreea": API_USER_AGENT,
       Cookie: `_session_id=${this.sessionId}`,
       ...extra,
     };
