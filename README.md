@@ -388,6 +388,14 @@ Standard-Pfad aktuell nicht mehr aufgerufen wird — siehe "Datenquelle".)
   Datenquelle gebraucht und waeren naeher an einem Signal als an einer
   neutralen Beobachtung).
 
+## Extra: TimeTree ICS Exporter
+
+`tools/timetree-exporter/` enthaelt ein unabhaengiges CLI-Tool, das nichts
+mit dem Momentum-Screener zu tun hat (nur zufaellig im selben Repo gebaut):
+es loggt sich mit den eigenen Zugangsdaten in TimeTree ein und exportiert
+einen privaten Kalender als `.ics`-Datei. Details, Optionen und Limitierungen
+in `tools/timetree-exporter/README.md`.
+
 ## Lizenz / Datenquelle
 
 Kursdaten: [Twelve Data](https://twelvedata.com/) (Free Tier, `time_series`,
