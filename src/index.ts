@@ -7,6 +7,7 @@ import { handleResetAdjustedClose, handleRunUpdate, handleTestFetch, isAuthorize
 import { handleBacktestLatest, handleBacktestRun } from "./api/backtest";
 import { handleScreener } from "./api/screener";
 import { handleStatus } from "./api/status";
+import { handleTimetreeExport, handleTimetreeLogin } from "./api/timetree";
 import { handleUnusualMoves } from "./api/unusualMoves";
 import { handleWatchlist } from "./api/watchlist";
 import { runDailyUpdate } from "./cron";
@@ -49,6 +50,14 @@ export default {
       if (pathname === "/api/admin/reset-adjusted-close" && request.method === "POST") {
         if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
         return await handleResetAdjustedClose(env);
+      }
+      if (pathname === "/api/timetree/login" && request.method === "POST") {
+        if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
+        return await handleTimetreeLogin(request);
+      }
+      if (pathname === "/api/timetree/export" && request.method === "POST") {
+        if (!isAuthorized(env, request)) return jsonError("Unauthorized", 401);
+        return await handleTimetreeExport(request);
       }
 
       if (pathname.startsWith("/api/")) {

@@ -1,8 +1,19 @@
 # TimeTree ICS Exporter
 
-Standalone CLI that logs into your own [TimeTree](https://timetreeapp.com/)
-account and exports a calendar to a standard `.ics` file, so you have a real
-backup file instead of only a live subscription link.
+Logs into your own [TimeTree](https://timetreeapp.com/) account and exports a
+calendar to a standard `.ics` file, so you have a real backup file instead of
+only a live subscription link. Two ways to use it:
+
+- **Web form** (`public/timetree.html`, served by the deployed Worker at
+  `/timetree`): enter email/password/calendar in the browser and download the
+  `.ics` file(s) directly - no local setup needed once the Worker is deployed.
+  Backed by `src/timetree/` + `src/api/timetree.ts`. Doesn't support
+  `--include-images` (see below).
+- **CLI** (this folder, `tools/timetree-exporter/`): everything the web form
+  does, plus per-event image export. Needs a local checkout with Node 20+.
+
+Both share the same TimeTree API logic, reimplemented independently for each
+runtime (Node vs. Cloudflare Workers).
 
 Unrelated to the momentum screener in the rest of this repo - it's bundled
 here only because that's where this session's work landed. It's a Node/TS
