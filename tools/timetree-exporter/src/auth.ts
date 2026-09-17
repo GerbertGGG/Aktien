@@ -45,13 +45,22 @@ export async function login(email: string, password: string): Promise<string> {
   });
 
   if (response.status !== 200) {
-    const body = await response.json().catch(() => undefined);
-    const code = extractErrorCode(body);
+    const text = await response.text();
+    let code: number | undefined;
+    try {
+      code = extractErrorCode(JSON.parse(text));
+    } catch {
+      // Response body wasn't JSON (e.g. an edge/WAF error page) - code stays
+      // undefined and the raw body snippet below is the only diagnostic.
+    }
     if (code === -702) throw new InvalidCredentialsError('Wrong email or password');
     if (code === -495) {
       throw new RateLimitAuthenticationError('Rate limited, please try again later');
     }
-    throw new AuthenticationError(`Login failed (HTTP ${response.status})`);
+    const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim();
+    throw new AuthenticationError(
+      `Login failed (HTTP ${response.status})${snippet ? `: ${snippet}` : ''}`,
+    );
   }
 
   const headers = response.headers as Headers & { getSetCookie?: () => string[] };
