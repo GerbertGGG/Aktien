@@ -1,4 +1,4 @@
-import { API_BASE_URI, API_USER_AGENT } from "./const";
+import { API_BASE_URI } from "./const";
 
 export class AuthenticationError extends Error {}
 export class InvalidCredentialsError extends AuthenticationError {}
@@ -34,7 +34,6 @@ export async function login(email: string, password: string): Promise<string> {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
-      "X-Timetreea": API_USER_AGENT,
     },
     body: JSON.stringify({
       uid: email,
