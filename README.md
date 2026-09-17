@@ -218,15 +218,20 @@ Rebalancing-Termin.
 
 ### Optional: Admin-Routen absichern
 
-`/api/admin/*` und `POST /api/backtest/run` sind standardmaessig offen
-(einfacher Einzelnutzer-Deploy). Um sie zu schuetzen:
+`/api/admin/*`, `POST /api/backtest/run` und `/api/timetree/*` (TimeTree-
+Exporter-Formular, siehe "Extra: TimeTree ICS Exporter" unten) sind
+standardmaessig offen (einfacher Einzelnutzer-Deploy). Da `/api/timetree/*`
+TimeTree-Zugangsdaten entgegennimmt und an TimeTree weiterreicht, sollte diese
+Route abgesichert werden, sobald die Worker-URL fuer andere erreichbar ist -
+sonst koennte sie als offener Anmelde-Proxy missbraucht werden. Absichern:
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN
 ```
 
 Danach muss jeder Request an diese Routen den Header `x-admin-token: <token>`
-mitschicken (das Dashboard hat dafuer ein Eingabefeld).
+mitschicken (Dashboard und TimeTree-Exporter-Formular haben dafuer je ein
+Eingabefeld).
 
 ## Konfiguration
 
@@ -390,11 +395,16 @@ Standard-Pfad aktuell nicht mehr aufgerufen wird — siehe "Datenquelle".)
 
 ## Extra: TimeTree ICS Exporter
 
-`tools/timetree-exporter/` enthaelt ein unabhaengiges CLI-Tool, das nichts
-mit dem Momentum-Screener zu tun hat (nur zufaellig im selben Repo gebaut):
-es loggt sich mit den eigenen Zugangsdaten in TimeTree ein und exportiert
-einen privaten Kalender als `.ics`-Datei. Details, Optionen und Limitierungen
-in `tools/timetree-exporter/README.md`.
+Unabhaengige Funktion, die nichts mit dem Momentum-Screener zu tun hat (nur
+zufaellig im selben Repo gebaut): loggt sich mit den eigenen Zugangsdaten in
+TimeTree ein und exportiert einen privaten Kalender als `.ics`-Datei.
+
+- **Web-Formular:** nach `npm run deploy` unter `https://DEIN-WORKER.workers.dev/timetree`
+  erreichbar - E-Mail/Passwort/Kalender eingeben, `.ics`-Datei(en) landen als
+  Download im Browser (Backend: `src/timetree/` + `src/api/timetree.ts`).
+- **CLI mit Bild-Export:** `tools/timetree-exporter/`, siehe
+  `tools/timetree-exporter/README.md` fuer Details, Optionen und
+  Limitierungen.
 
 ## Lizenz / Datenquelle
 
