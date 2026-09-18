@@ -33,25 +33,43 @@ function getSetCookieHeaders(response: Response): string[] {
   return raw ? [raw] : [];
 }
 
-function parseSessionId(setCookieHeaders: string[]): string | undefined {
-  for (const header of setCookieHeaders) {
-    const match = /(?:^|;\s*)_session_id=([^;]+)/.exec(header);
-    // Keep the raw (possibly percent-encoded) cookie value as issued - it
-    // gets echoed back verbatim as a Cookie header on every later API call
-    // (see TimeTreeApi.headers() in ./api), same as a real browser would.
-    // Decoding it here corrupted that round-trip: TimeTree's session cookie
-    // can contain characters that must stay percent-encoded, and sending the
-    // decoded form made every authenticated call after login fail with a
-    // generic HTTP 400 (e.g. "Failed to get calendar metadata").
-    if (match) return match[1]!;
-  }
-  return undefined;
-}
-
 function cookiePairsFrom(setCookieHeaders: string[]): string {
   return setCookieHeaders
     .map((header) => header.split(";", 1)[0]!.trim())
     .filter(Boolean)
+    .join("; ");
+}
+
+function cookieJarToMap(cookieHeader: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const pair of cookieHeader.split(";")) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    map.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
+  }
+  return map;
+}
+
+// Merges newly-issued Set-Cookie values onto an existing "name=value; ..."
+// jar, replacing any cookie the new response updates and keeping the rest -
+// same as a browser's cookie jar. Needed because TimeTree's login response
+// only re-sets a subset of cookies (notably _session_id); the ones only set
+// on the sign-in GET (see fetchCsrfContext) still had to be present on every
+// later authenticated call, or those calls failed with a generic HTTP 400
+// (e.g. "Failed to get calendar metadata") despite login itself succeeding.
+function mergeCookieJar(baseCookieHeader: string, newSetCookieHeaders: string[]): string {
+  const map = cookieJarToMap(baseCookieHeader);
+  for (const pair of cookiePairsFrom(newSetCookieHeaders).split(";")) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    map.set(trimmed.slice(0, eq), trimmed.slice(eq + 1));
+  }
+  return Array.from(map.entries())
+    .map(([name, value]) => `${name}=${value}`)
     .join("; ");
 }
 
@@ -79,15 +97,19 @@ async function fetchCsrfContext(): Promise<{ token: string; cookies: string }> {
 }
 
 /**
- * Logs in via TimeTree's unofficial web-app API and returns the `_session_id`
- * cookie value used to authenticate subsequent requests. Reverse-engineered
- * from https://github.com/eoleedi/TimeTree-exporter (unofficial, unsupported
- * by TimeTree, can break at any time).
+ * Logs in via TimeTree's unofficial web-app API and returns the full
+ * "name=value; ..." Cookie header to send on every subsequent authenticated
+ * request (not just the bare `_session_id` value - see mergeCookieJar).
+ * Reverse-engineered from https://github.com/eoleedi/TimeTree-exporter
+ * (unofficial, unsupported by TimeTree, can break at any time).
  */
 export async function login(email: string, password: string): Promise<string> {
   let response: Response;
+  let cookies: string;
   try {
-    const { token, cookies } = await fetchCsrfContext();
+    const csrf = await fetchCsrfContext();
+    cookies = csrf.cookies;
+    const token = csrf.token;
 
     response = await fetch(`${API_BASE_URI}/auth/email/signin`, {
       method: "PUT",
@@ -132,9 +154,9 @@ export async function login(email: string, password: string): Promise<string> {
     );
   }
 
-  const sessionId = parseSessionId(getSetCookieHeaders(response));
-  if (!sessionId) {
+  const cookieJar = mergeCookieJar(cookies, getSetCookieHeaders(response));
+  if (!cookieJarToMap(cookieJar).has("_session_id")) {
     throw new AuthenticationError("Login succeeded but no session cookie was returned");
   }
-  return sessionId;
+  return cookieJar;
 }

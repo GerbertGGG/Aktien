@@ -60,13 +60,16 @@ function extractActivityComment(activity: RawActivity): string | null {
  * full CLI with image export.
  */
 export class TimeTreeApi {
-  constructor(private readonly sessionId: string) {}
+  // Full "name=value; ..." Cookie header from login(), not just the bare
+  // _session_id value - TimeTree's other calls need cookies issued
+  // alongside it too, not _session_id in isolation (see auth.ts).
+  constructor(private readonly cookieJar: string) {}
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return {
       "Content-Type": "application/json",
       "X-Timetreea": API_USER_AGENT,
-      Cookie: `_session_id=${this.sessionId}`,
+      Cookie: this.cookieJar,
       ...extra,
     };
   }
