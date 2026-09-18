@@ -76,7 +76,10 @@ export class TimeTreeApi {
 
   async getMetadata(): Promise<CalendarMetadata[]> {
     const res = await fetch(`${API_BASE_URI}/calendars?since=0`, { headers: this.headers() });
-    if (!res.ok) throw new Error(`Failed to get calendar metadata (HTTP ${res.status})`);
+    if (!res.ok) {
+      const snippet = (await res.text().catch(() => "")).slice(0, 300).replace(/\s+/g, " ").trim();
+      throw new Error(`Failed to get calendar metadata (HTTP ${res.status})${snippet ? `: ${snippet}` : ""}`);
+    }
     const json = (await res.json()) as { calendars: CalendarMetadata[] };
     return json.calendars;
   }
