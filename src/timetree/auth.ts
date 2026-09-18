@@ -96,20 +96,33 @@ async function fetchCsrfContext(): Promise<{ token: string; cookies: string }> {
   return { token: match[1]!, cookies: cookiePairsFrom(getSetCookieHeaders(response)) };
 }
 
+export interface TimeTreeSession {
+  // Full "name=value; ..." Cookie header to send on every subsequent
+  // authenticated request (not just the bare `_session_id` value - see
+  // mergeCookieJar).
+  cookieJar: string;
+  // A live browser capture showed every authenticated call (not just login)
+  // sending X-Csrf-Token, with a different token value than the one used at
+  // login - but Rails' CSRF check is normally per-session, not per-page-load,
+  // so reusing the login-time token here first before adding a second
+  // "fetch a page just to get a fresh token" round-trip.
+  csrfToken: string;
+}
+
 /**
- * Logs in via TimeTree's unofficial web-app API and returns the full
- * "name=value; ..." Cookie header to send on every subsequent authenticated
- * request (not just the bare `_session_id` value - see mergeCookieJar).
+ * Logs in via TimeTree's unofficial web-app API and returns the session
+ * (cookie jar + CSRF token) needed to authenticate subsequent requests.
  * Reverse-engineered from https://github.com/eoleedi/TimeTree-exporter
  * (unofficial, unsupported by TimeTree, can break at any time).
  */
-export async function login(email: string, password: string): Promise<string> {
+export async function login(email: string, password: string): Promise<TimeTreeSession> {
   let response: Response;
   let cookies: string;
+  let token: string;
   try {
     const csrf = await fetchCsrfContext();
     cookies = csrf.cookies;
-    const token = csrf.token;
+    token = csrf.token;
 
     response = await fetch(`${API_BASE_URI}/auth/email/signin`, {
       method: "PUT",
@@ -158,5 +171,5 @@ export async function login(email: string, password: string): Promise<string> {
   if (!cookieJarToMap(cookieJar).has("_session_id")) {
     throw new AuthenticationError("Login succeeded but no session cookie was returned");
   }
-  return cookieJar;
+  return { cookieJar, csrfToken: token };
 }

@@ -1,4 +1,4 @@
-import { API_BASE_URI, API_USER_AGENT } from "./const";
+import { API_BASE_URI, API_USER_AGENT, API_V2_BASE_URI } from "./const";
 import type { CalendarLabel, RawEvent } from "./event";
 
 export type LabelMap = Map<number, CalendarLabel>;
@@ -60,22 +60,30 @@ function extractActivityComment(activity: RawActivity): string | null {
  * full CLI with image export.
  */
 export class TimeTreeApi {
-  // Full "name=value; ..." Cookie header from login(), not just the bare
-  // _session_id value - TimeTree's other calls need cookies issued
-  // alongside it too, not _session_id in isolation (see auth.ts).
-  constructor(private readonly cookieJar: string) {}
+  constructor(
+    // Full "name=value; ..." Cookie header from login(), not just the bare
+    // _session_id value - TimeTree's other calls need cookies issued
+    // alongside it too, not _session_id in isolation (see auth.ts).
+    private readonly cookieJar: string,
+    // A live browser capture showed every authenticated API call sending
+    // X-Csrf-Token, not just login - without it, GET /calendars (also
+    // confirmed to actually be /api/v2/calendars, not v1) fails with a
+    // generic HTTP 400.
+    private readonly csrfToken: string,
+  ) {}
 
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     return {
       "Content-Type": "application/json",
       "X-Timetreea": API_USER_AGENT,
+      "X-Csrf-Token": this.csrfToken,
       Cookie: this.cookieJar,
       ...extra,
     };
   }
 
   async getMetadata(): Promise<CalendarMetadata[]> {
-    const res = await fetch(`${API_BASE_URI}/calendars?since=0`, { headers: this.headers() });
+    const res = await fetch(`${API_V2_BASE_URI}/calendars`, { headers: this.headers() });
     if (!res.ok) {
       const snippet = (await res.text().catch(() => "")).slice(0, 300).replace(/\s+/g, " ").trim();
       throw new Error(`Failed to get calendar metadata (HTTP ${res.status})${snippet ? `: ${snippet}` : ""}`);

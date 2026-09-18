@@ -2,10 +2,12 @@
 //
 // Two-step flow, mirroring TimeTree's own web app session:
 //   1. POST /api/timetree/login  {email, password}
-//        -> logs in, returns {sessionId, calendars}. The password is used
-//           once to obtain a session id and is never stored or logged.
-//   2. POST /api/timetree/export {sessionId, calendarId, splitByLabel?, includeComments?}
-//        -> fetches labels + events with that session id and returns one or
+//        -> logs in, returns {sessionId, csrfToken, calendars}. The password
+//           is used once to obtain a session and is never stored or logged.
+//           Both sessionId (cookie jar) and csrfToken are required on every
+//           later authenticated TimeTree call, not just login.
+//   2. POST /api/timetree/export {sessionId, csrfToken, calendarId, splitByLabel?, includeComments?}
+//        -> fetches labels + events with that session and returns one or
 //           more .ics file contents as JSON for the browser to download.
 //
 // Unofficial, reverse-engineered TimeTree API (see src/timetree/). No
@@ -27,6 +29,7 @@ interface LoginRequestBody {
 
 interface ExportRequestBody {
   sessionId?: unknown;
+  csrfToken?: unknown;
   calendarId?: unknown;
   splitByLabel?: unknown;
   includeComments?: unknown;
@@ -70,11 +73,12 @@ export async function handleTimetreeLogin(request: Request): Promise<Response> {
   if (!email || !password) return jsonError("email and password are required", 400);
 
   try {
-    const sessionId = await login(email, password);
-    const api = new TimeTreeApi(sessionId);
+    const { cookieJar, csrfToken } = await login(email, password);
+    const api = new TimeTreeApi(cookieJar, csrfToken);
     const calendars = await api.getMetadata();
     return json({
-      sessionId,
+      sessionId: cookieJar,
+      csrfToken,
       calendars: calendars.map((c) => ({ id: c.id, name: c.name, aliasCode: c.alias_code ?? null })),
     });
   } catch (err) {
@@ -96,14 +100,15 @@ export async function handleTimetreeExport(request: Request): Promise<Response> 
   }
 
   const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+  const csrfToken = typeof body.csrfToken === "string" ? body.csrfToken : "";
   const calendarId = Number(body.calendarId);
-  if (!sessionId || !Number.isFinite(calendarId)) {
-    return jsonError("sessionId and calendarId are required", 400);
+  if (!sessionId || !csrfToken || !Number.isFinite(calendarId)) {
+    return jsonError("sessionId, csrfToken and calendarId are required", 400);
   }
   const splitByLabel = body.splitByLabel === true;
   const includeComments = body.includeComments === true;
 
-  const api = new TimeTreeApi(sessionId);
+  const api = new TimeTreeApi(sessionId, csrfToken);
 
   let metadata: CalendarMetadata[];
   let rawEvents: RawEvent[];

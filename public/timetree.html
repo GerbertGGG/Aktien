@@ -92,6 +92,7 @@
 <script>
   const $ = (id) => document.getElementById(id);
   let sessionId = null;
+  let csrfToken = null;
 
   function setStatus(el, message, kind) {
     el.textContent = message;
@@ -137,6 +138,7 @@
     try {
       const data = await fetchJSON("/api/timetree/login", { email, password });
       sessionId = data.sessionId;
+      csrfToken = data.csrfToken;
       $("password").value = "";
       const select = $("calendar-select");
       select.innerHTML = "";
@@ -163,6 +165,7 @@
     try {
       const data = await fetchJSON("/api/timetree/export", {
         sessionId,
+        csrfToken,
         calendarId: Number($("calendar-select").value),
         splitByLabel: $("split-by-label").checked,
         includeComments: $("include-comments").checked,
