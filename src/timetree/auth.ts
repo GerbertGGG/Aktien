@@ -5,6 +5,7 @@ export class InvalidCredentialsError extends AuthenticationError {}
 export class RateLimitAuthenticationError extends AuthenticationError {}
 
 const SIGNIN_PAGE_URL = "https://timetreeapp.com/signin";
+const CALENDARS_PAGE_URL = "https://timetreeapp.com/calendars";
 
 // A real browser User-Agent, in case TimeTree's bot/CSRF protection rejects
 // non-browser-looking requests. NOTE: "Origin" and "Referer" were tried here
@@ -75,23 +76,30 @@ function mergeCookieJar(baseCookieHeader: string, newSetCookieHeaders: string[])
 
 /**
  * TimeTree's web app serves a CSRF token via a <meta name="csrf-token">
- * tag on its own sign-in page, and the login PUT below requires it (as
- * X-Csrf-Token) plus the cookies issued alongside it - without both, the
- * API rejects the request outright with a generic, undocumented error
- * regardless of whether the credentials are correct.
+ * tag on every page it renders (including the sign-in page while
+ * unauthenticated), and API calls require it as X-Csrf-Token - without it,
+ * the API rejects the request outright with a generic, undocumented error
+ * regardless of whether the credentials/session are otherwise valid.
+ *
+ * Pass a cookieHeader to fetch this from an *authenticated* page - confirmed
+ * live (via a real browser's console) that the pre-login token from
+ * SIGNIN_PAGE_URL stops validating once login succeeds (Rails-typical
+ * session-fixation protection rotates it), so login() re-fetches one from an
+ * authenticated page before returning.
  */
-async function fetchCsrfContext(): Promise<{ token: string; cookies: string }> {
-  const response = await fetch(SIGNIN_PAGE_URL, {
-    headers: { "User-Agent": BROWSER_USER_AGENT },
+async function fetchCsrfContext(url: string, cookieHeader?: string): Promise<{ token: string; cookies: string }> {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": BROWSER_USER_AGENT,
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+    },
   });
   const html = await response.text();
   const match =
     /<meta[^>]*name=["']csrf-token["'][^>]*content=["']([^"']+)["']/i.exec(html) ??
     /<meta[^>]*content=["']([^"']+)["'][^>]*name=["']csrf-token["']/i.exec(html);
   if (!match) {
-    throw new AuthenticationError(
-      "Could not find a CSRF token on TimeTree's sign-in page (its markup may have changed)",
-    );
+    throw new AuthenticationError(`Could not find a CSRF token on ${url} (its markup may have changed)`);
   }
   return { token: match[1]!, cookies: cookiePairsFrom(getSetCookieHeaders(response)) };
 }
@@ -101,11 +109,9 @@ export interface TimeTreeSession {
   // authenticated request (not just the bare `_session_id` value - see
   // mergeCookieJar).
   cookieJar: string;
-  // A live browser capture showed every authenticated call (not just login)
-  // sending X-Csrf-Token, with a different token value than the one used at
-  // login - but Rails' CSRF check is normally per-session, not per-page-load,
-  // so reusing the login-time token here first before adding a second
-  // "fetch a page just to get a fresh token" round-trip.
+  // Fetched fresh from an authenticated page after login (see
+  // fetchCsrfContext) - the pre-login token stops validating once
+  // authenticated, confirmed live via a real browser's console.
   csrfToken: string;
 }
 
@@ -120,7 +126,7 @@ export async function login(email: string, password: string): Promise<TimeTreeSe
   let cookies: string;
   let token: string;
   try {
-    const csrf = await fetchCsrfContext();
+    const csrf = await fetchCsrfContext(SIGNIN_PAGE_URL);
     cookies = csrf.cookies;
     token = csrf.token;
 
@@ -167,9 +173,25 @@ export async function login(email: string, password: string): Promise<TimeTreeSe
     );
   }
 
-  const cookieJar = mergeCookieJar(cookies, getSetCookieHeaders(response));
+  let cookieJar = mergeCookieJar(cookies, getSetCookieHeaders(response));
   if (!cookieJarToMap(cookieJar).has("_session_id")) {
     throw new AuthenticationError("Login succeeded but no session cookie was returned");
   }
-  return { cookieJar, csrfToken: token };
+
+  // The pre-login CSRF token no longer validates once authenticated (see
+  // fetchCsrfContext's docstring) - fetch a fresh one from an authenticated
+  // page before it's used for any real API call.
+  try {
+    const authedCsrf = await fetchCsrfContext(CALENDARS_PAGE_URL, cookieJar);
+    // authedCsrf.cookies is already "name=value; ..." pairs (no extra
+    // Set-Cookie attributes) - mergeCookieJar's second arg just needs each
+    // entry to look like a Set-Cookie value, which a bare pair satisfies.
+    cookieJar = mergeCookieJar(cookieJar, authedCsrf.cookies ? authedCsrf.cookies.split("; ") : []);
+    return { cookieJar, csrfToken: authedCsrf.token };
+  } catch (err) {
+    if (err instanceof AuthenticationError) throw err;
+    throw new AuthenticationError(
+      `Unexpected error fetching an authenticated CSRF token: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
