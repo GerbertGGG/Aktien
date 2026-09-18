@@ -1,58 +1,176 @@
 <title>TimeTree ICS Exporter</title>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="/style.css" />
-<link rel="stylesheet" href="/timetree.css" />
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 640px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  .subtitle { color: #666; margin-top: 0; }
+  .banner {
+    background: #fff8e1;
+    border: 1px solid #e0c36b;
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    font-size: 0.9rem;
+    margin-bottom: 1.5rem;
+  }
+  section {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 1rem 1.25rem 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  section[hidden] { display: none; }
+  label { display: block; margin-top: 0.75rem; font-size: 0.9rem; font-weight: 600; }
+  input[type="email"], input[type="password"], select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.5rem;
+    margin-top: 0.25rem;
+    font-size: 1rem;
+  }
+  .checkbox-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.75rem; }
+  .checkbox-row label { margin: 0; font-weight: normal; }
+  button {
+    margin-top: 1rem;
+    padding: 0.6rem 1.2rem;
+    font-size: 1rem;
+    cursor: pointer;
+  }
+  .status-line { display: block; margin-top: 0.6rem; font-size: 0.9rem; min-height: 1.2em; }
+  .status-line.error { color: #b3261e; }
+  .status-line.ok { color: #1e7a34; }
+  .hint { color: #666; font-size: 0.85rem; }
+</style>
 
-<div class="wrap">
-  <header>
-    <h1>TimeTree ICS Exporter</h1>
-    <p class="subtitle">Loggt sich in einen privaten TimeTree-Kalender ein und liefert eine echte .ics-Datei zum Download.</p>
-  </header>
+<h1>TimeTree ICS Exporter</h1>
+<p class="subtitle">Loggt sich in einen privaten TimeTree-Kalender ein und liefert eine echte .ics-Datei zum Download.</p>
 
-  <div class="banner">
-    <strong>Inoffiziell.</strong>
-    Nutzt TimeTrees nicht dokumentierte Web-API, nicht von TimeTree unterstuetzt und kann
-    jederzeit kaputtgehen. E-Mail/Passwort gehen ausschliesslich direkt an
-    <code>timetreeapp.com</code> (ueber diesen Worker als Proxy) und werden nirgends
-    gespeichert oder geloggt. Kommentare und Bild-Anhaenge pro Termin werden aktuell nicht
-    exportiert, nur Titel, Zeit, Ort, Notiz, Label und Erinnerungen.
-  </div>
-
-  <section id="login-section">
-    <h2>1. Anmelden</h2>
-    <p class="hint">Der Kalender-Code aus der TimeTree-URL wird nicht gebraucht &ndash; nach dem Login stehen alle deine Kalender zur Auswahl.</p>
-    <div class="field">
-      <label for="tt-email">TimeTree-E-Mail</label>
-      <input id="tt-email" type="email" autocomplete="username" />
-    </div>
-    <div class="field">
-      <label for="tt-password">TimeTree-Passwort</label>
-      <input id="tt-password" type="password" autocomplete="current-password" />
-    </div>
-    <div class="field">
-      <label for="tt-admin-token">Admin-Token (nur falls fuer diesen Worker konfiguriert)</label>
-      <input id="tt-admin-token" type="password" autocomplete="off" />
-    </div>
-    <div class="actions">
-      <button class="primary" id="login-btn">Anmelden &amp; Kalender laden</button>
-      <span class="status-line" id="login-status"></span>
-    </div>
-  </section>
-
-  <section id="export-section" hidden>
-    <h2>2. Kalender exportieren</h2>
-    <p class="hint">Kalender waehlen und als .ics herunterladen.</p>
-    <div id="calendar-list" class="field"></div>
-    <div class="actions">
-      <button class="primary" id="export-btn">ICS herunterladen</button>
-      <span class="status-line" id="export-status"></span>
-    </div>
-  </section>
-
-  <footer>
-    Kein offizielles TimeTree-Feature &mdash; reverse-engineerte Web-API, jederzeit ohne Vorwarnung kaputt moeglich.
-  </footer>
+<div class="banner">
+  <strong>Inoffiziell.</strong> Nutzt TimeTrees nicht dokumentierte Web-API, nicht von TimeTree
+  unterstuetzt und kann jederzeit kaputtgehen. E-Mail/Passwort gehen ausschliesslich direkt an
+  <code>timetreeapp.com</code> (ueber diesen Worker als Proxy) und werden nirgends gespeichert oder
+  geloggt. Fuer Bild-Export pro Termin: CLI-Tool in <code>tools/timetree-exporter/</code> nutzen.
 </div>
 
-<script src="/timetree.js"></script>
+<section id="login-section">
+  <h2>1. Anmelden</h2>
+  <label for="email">TimeTree-E-Mail</label>
+  <input type="email" id="email" autocomplete="username" />
+  <label for="password">TimeTree-Passwort</label>
+  <input type="password" id="password" autocomplete="current-password" />
+  <label for="admin-token">Admin-Token (nur falls fuer diesen Worker konfiguriert)</label>
+  <input type="password" id="admin-token" autocomplete="off" />
+  <button id="login-btn">Anmelden &amp; Kalender laden</button>
+  <span class="status-line" id="login-status"></span>
+</section>
+
+<section id="export-section" hidden>
+  <h2>2. Exportieren</h2>
+  <label for="calendar-select">Kalender</label>
+  <select id="calendar-select"></select>
+  <div class="checkbox-row">
+    <input type="checkbox" id="split-by-label" />
+    <label for="split-by-label">Separate .ics-Datei je Label</label>
+  </div>
+  <div class="checkbox-row">
+    <input type="checkbox" id="include-comments" />
+    <label for="include-comments">Kommentare pro Termin mit exportieren (langsamer)</label>
+  </div>
+  <button id="export-btn">Exportieren</button>
+  <span class="status-line" id="export-status"></span>
+  <p class="hint">Die .ics-Datei(en) landen als Download in deinem Browser - danach in Google
+  Calendar, Apple Kalender, Outlook o.ae. importierbar.</p>
+</section>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let sessionId = null;
+
+  function setStatus(el, message, kind) {
+    el.textContent = message;
+    el.className = "status-line" + (kind ? ` ${kind}` : "");
+  }
+
+  function authHeaders() {
+    const token = $("admin-token").value.trim();
+    return token ? { "x-admin-token": token } : {};
+  }
+
+  async function fetchJSON(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    return data;
+  }
+
+  function downloadFile(filename, content) {
+    const blob = new Blob([content], { type: "text/calendar;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  $("login-btn").addEventListener("click", async () => {
+    const email = $("email").value.trim();
+    const password = $("password").value;
+    if (!email || !password) {
+      setStatus($("login-status"), "Bitte E-Mail und Passwort eingeben.", "error");
+      return;
+    }
+    setStatus($("login-status"), "Melde an...", "");
+    try {
+      const data = await fetchJSON("/api/timetree/login", { email, password });
+      sessionId = data.sessionId;
+      $("password").value = "";
+      const select = $("calendar-select");
+      select.innerHTML = "";
+      for (const cal of data.calendars) {
+        const opt = document.createElement("option");
+        opt.value = cal.id;
+        opt.textContent = cal.aliasCode ? `${cal.name} (${cal.aliasCode})` : cal.name;
+        select.appendChild(opt);
+      }
+      if (data.calendars.length === 0) {
+        setStatus($("login-status"), "Keine Kalender in diesem Account gefunden.", "error");
+        return;
+      }
+      setStatus($("login-status"), `Angemeldet. ${data.calendars.length} Kalender gefunden.`, "ok");
+      $("export-section").hidden = false;
+    } catch (err) {
+      setStatus($("login-status"), err.message, "error");
+    }
+  });
+
+  $("export-btn").addEventListener("click", async () => {
+    if (!sessionId) return;
+    setStatus($("export-status"), "Exportiere...", "");
+    try {
+      const data = await fetchJSON("/api/timetree/export", {
+        sessionId,
+        calendarId: Number($("calendar-select").value),
+        splitByLabel: $("split-by-label").checked,
+        includeComments: $("include-comments").checked,
+      });
+      for (const file of data.files) downloadFile(file.filename, file.content);
+      setStatus($("export-status"), `${data.files.length} Datei(en) heruntergeladen.`, "ok");
+    } catch (err) {
+      setStatus($("export-status"), err.message, "error");
+    }
+  });
+</script>

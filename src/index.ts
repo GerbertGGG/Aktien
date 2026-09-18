@@ -64,12 +64,6 @@ export default {
         return jsonError("Not found", 404);
       }
 
-      // Standalone TimeTree exporter page — not part of the SPA, served
-      // explicitly so /timetree doesn't fall through to index.html.
-      if (pathname === "/timetree" && request.method === "GET") {
-        return await env.ASSETS.fetch(new Request(new URL("/timetree.html", url), request));
-      }
-
       // Everything else: static dashboard (public/), including SPA fallback.
       return await env.ASSETS.fetch(request);
     } catch (err) {
