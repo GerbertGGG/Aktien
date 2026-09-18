@@ -5,6 +5,16 @@ export class InvalidCredentialsError extends AuthenticationError {}
 export class RateLimitAuthenticationError extends AuthenticationError {}
 
 const SIGNIN_PAGE_URL = "https://timetreeapp.com/signin";
+const ORIGIN = "https://timetreeapp.com";
+
+// A real browser User-Agent. Rails' CSRF protection (which TimeTree's own
+// error message strongly suggests it uses) can reject an otherwise-correct
+// token+cookie pair if the request doesn't look like it came from a browser
+// (missing/non-browser User-Agent, wrong Origin/Referer) - this is on top of
+// the TimeTree-specific "X-Timetreea" app-identifier header below, which is
+// unrelated.
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 function extractErrorCode(body: unknown): number | undefined {
   if (body && typeof body === "object" && "error" in body) {
@@ -47,7 +57,9 @@ function cookiePairsFrom(setCookieHeaders: string[]): string {
  * regardless of whether the credentials are correct.
  */
 async function fetchCsrfContext(): Promise<{ token: string; cookies: string }> {
-  const response = await fetch(SIGNIN_PAGE_URL);
+  const response = await fetch(SIGNIN_PAGE_URL, {
+    headers: { "User-Agent": BROWSER_USER_AGENT },
+  });
   const html = await response.text();
   const match =
     /<meta[^>]*name=["']csrf-token["'][^>]*content=["']([^"']+)["']/i.exec(html) ??
@@ -73,6 +85,9 @@ export async function login(email: string, password: string): Promise<string> {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
+      "User-Agent": BROWSER_USER_AGENT,
+      "Origin": ORIGIN,
+      "Referer": SIGNIN_PAGE_URL,
       "X-Timetreea": API_USER_AGENT,
       "X-Csrf-Token": token,
       ...(cookies ? { Cookie: cookies } : {}),
