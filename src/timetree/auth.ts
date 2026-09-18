@@ -5,14 +5,13 @@ export class InvalidCredentialsError extends AuthenticationError {}
 export class RateLimitAuthenticationError extends AuthenticationError {}
 
 const SIGNIN_PAGE_URL = "https://timetreeapp.com/signin";
-const ORIGIN = "https://timetreeapp.com";
 
-// A real browser User-Agent. Rails' CSRF protection (which TimeTree's own
-// error message strongly suggests it uses) can reject an otherwise-correct
-// token+cookie pair if the request doesn't look like it came from a browser
-// (missing/non-browser User-Agent, wrong Origin/Referer) - this is on top of
-// the TimeTree-specific "X-Timetreea" app-identifier header below, which is
-// unrelated.
+// A real browser User-Agent, in case TimeTree's bot/CSRF protection rejects
+// non-browser-looking requests. NOTE: "Origin" and "Referer" were tried here
+// too but had to be dropped - the Workers runtime throws a TypeError when a
+// fetch() sets "Origin" (forbidden header name, presumably to stop Workers
+// forging it for SSRF/origin-spoofing), which crashed this route with a
+// generic 500 before it ever reached TimeTree.
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
@@ -79,25 +78,33 @@ async function fetchCsrfContext(): Promise<{ token: string; cookies: string }> {
  * by TimeTree, can break at any time).
  */
 export async function login(email: string, password: string): Promise<string> {
-  const { token, cookies } = await fetchCsrfContext();
+  let response: Response;
+  try {
+    const { token, cookies } = await fetchCsrfContext();
 
-  const response = await fetch(`${API_BASE_URI}/auth/email/signin`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": BROWSER_USER_AGENT,
-      "Origin": ORIGIN,
-      "Referer": SIGNIN_PAGE_URL,
-      "X-Timetreea": API_USER_AGENT,
-      "X-Csrf-Token": token,
-      ...(cookies ? { Cookie: cookies } : {}),
-    },
-    body: JSON.stringify({
-      uid: email,
-      password,
-      uuid: crypto.randomUUID().replace(/-/g, ""),
-    }),
-  });
+    response = await fetch(`${API_BASE_URI}/auth/email/signin`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": BROWSER_USER_AGENT,
+        "X-Timetreea": API_USER_AGENT,
+        "X-Csrf-Token": token,
+        ...(cookies ? { Cookie: cookies } : {}),
+      },
+      body: JSON.stringify({
+        uid: email,
+        password,
+        uuid: crypto.randomUUID().replace(/-/g, ""),
+      }),
+    });
+  } catch (err) {
+    // Surface runtime errors (e.g. the Workers runtime rejecting a forbidden
+    // header name) as a visible login error instead of an opaque 500 -
+    // AuthenticationError is what the route handler turns into a JSON
+    // response the UI actually shows.
+    if (err instanceof AuthenticationError) throw err;
+    throw new AuthenticationError(`Unexpected error talking to TimeTree: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   if (response.status !== 200) {
     const text = await response.text();
