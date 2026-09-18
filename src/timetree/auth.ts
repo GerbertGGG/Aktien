@@ -36,7 +36,14 @@ function getSetCookieHeaders(response: Response): string[] {
 function parseSessionId(setCookieHeaders: string[]): string | undefined {
   for (const header of setCookieHeaders) {
     const match = /(?:^|;\s*)_session_id=([^;]+)/.exec(header);
-    if (match) return decodeURIComponent(match[1]!);
+    // Keep the raw (possibly percent-encoded) cookie value as issued - it
+    // gets echoed back verbatim as a Cookie header on every later API call
+    // (see TimeTreeApi.headers() in ./api), same as a real browser would.
+    // Decoding it here corrupted that round-trip: TimeTree's session cookie
+    // can contain characters that must stay percent-encoded, and sending the
+    // decoded form made every authenticated call after login fail with a
+    // generic HTTP 400 (e.g. "Failed to get calendar metadata").
+    if (match) return match[1]!;
   }
   return undefined;
 }
